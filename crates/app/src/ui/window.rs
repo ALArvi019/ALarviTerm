@@ -10,11 +10,13 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use alarviterm_core::actions::{self, Keymap};
 use alarviterm_core::claude::{self, AuthHint, Resume};
+use alarviterm_core::limits;
 use alarviterm_core::layout::{Direction, Layout, NodeId, Orientation, Preset, Side};
 use alarviterm_core::model::{NewProject, NewSession, SessionKind};
 use alarviterm_core::monitor::{self, Phase, StateStore};
 use alarviterm_core::paths::{display_path, home_dir, Paths};
 use alarviterm_core::persistence::Database;
+use alarviterm_core::plugins::{self, Plugin, PluginStatus, SessionInfo};
 use alarviterm_core::search::{self, SortOrder, StatusFilter};
 use alarviterm_core::sessions::tmux::{find_tmux, TmuxOptions};
 use alarviterm_core::sessions::{
@@ -33,7 +35,8 @@ use super::panes::{self, ChildKind, DropZone, PaneCallbacks, PaneView, TabInfo};
 use super::prefs;
 use super::projects::{self, ManagerCallbacks};
 use super::shortcuts;
-use super::sidebar::{self, RowTarget, SearchCallbacks, Sidebar};
+use super::stats;
+use super::sidebar::{self, RowButton, RowExtra, RowTarget, SearchCallbacks, Sidebar};
 use super::status;
 use super::style;
 use super::terminal;
@@ -111,6 +114,10 @@ struct Inner {
     details_for: RefCell<Option<String>>,
     details_busy: Cell<bool>,
     cpu_sample: RefCell<Option<(String, u64, Instant)>>,
+    /// Transcripciones ya leídas, para el panel de estadísticas.
+    stats_library: stats::SharedLibrary,
+    /// Muestra anterior de CPU de la propia aplicación.
+    app_sample: Cell<Option<(u64, Instant)>>,
     /// Atajos vigentes. Lo comparte el editor de atajos.
     keymap: Rc<RefCell<Keymap>>,
     settings: Rc<RefCell<Settings>>,
@@ -123,6 +130,15 @@ struct Inner {
     env_shell: String,
     /// Botones cuyo tooltip cita el atajo de su acción.
     hinted: Vec<(gtk::Widget, &'static str, &'static str)>,
+    /// Complementos instalados por el usuario, leídos al arrancar.
+    plugins: Vec<Plugin>,
+    /// Última respuesta de estado de cada complemento, por su identificador.
+    plugin_status: RefCell<HashMap<String, PluginStatus>>,
+    /// Cuándo toca volver a consultar a cada complemento.
+    plugin_due: RefCell<HashMap<String, Instant>>,
+    plugin_busy: RefCell<HashSet<String>>,
+    /// Último problema avisado de cada complemento, para no repetirlo.
+    plugin_errors: RefCell<HashMap<String, String>>,
 
     title: adw::WindowTitle,
     paned: gtk::Paned,
@@ -163,6 +179,10 @@ impl MainWindow {
             }
         };
 
+        let (plugin_list, plugin_problems) = plugins::plugins_dir()
+            .map(|dir| plugins::discover(&dir))
+            .unwrap_or_default();
+
         let env_shell = std::env::var("SHELL")
             .ok()
             .filter(|s| !s.is_empty())
@@ -176,9 +196,9 @@ impl MainWindow {
         // sesión. La configuración de Claude Code del usuario no se toca.
         match monitor::find_hook_binary() {
             Some(hook) => {
-                let settings = paths.hook_settings();
-                std::fs::write(&settings, monitor::hook_settings(&hook)?)?;
-                manager.enable_monitor(store.clone(), settings);
+                let file = paths.hook_settings();
+                std::fs::write(&file, monitor::hook_settings(&hook, settings.account_limits)?)?;
+                manager.enable_monitor(store.clone(), file);
             }
             None => log::warn!(
                 "no se encuentra alarviterm-hook: las sesiones de Claude Code se lanzan sin monitorización"
@@ -242,6 +262,7 @@ impl MainWindow {
         main_menu.append_item(&sidebar::plain_item("Paleta de comandos", "win.command-palette"));
         main_menu.append_item(&sidebar::plain_item("Proyectos", "win.projects"));
         main_menu.append_item(&sidebar::plain_item("Atajos de teclado", "win.shortcuts"));
+        main_menu.append_item(&sidebar::plain_item("Estadísticas de uso", "win.stats"));
         main_menu.append_item(&sidebar::plain_item("Ajustes", "win.settings"));
         let more = gtk::MenuButton::new();
         more.set_icon_name("open-menu-symbolic");
@@ -330,6 +351,8 @@ impl MainWindow {
             details_for: RefCell::new(None),
             details_busy: Cell::new(false),
             cpu_sample: RefCell::new(None),
+            app_sample: Cell::new(None),
+            stats_library: Default::default(),
             keymap: Rc::new(RefCell::new(keymap)),
             settings: Rc::new(RefCell::new(settings)),
             tmux: backend,
@@ -337,6 +360,11 @@ impl MainWindow {
             hidden_since: RefCell::new(HashMap::new()),
             env_shell,
             hinted,
+            plugins: plugin_list,
+            plugin_status: RefCell::new(HashMap::new()),
+            plugin_due: RefCell::new(HashMap::new()),
+            plugin_busy: RefCell::new(HashSet::new()),
+            plugin_errors: RefCell::new(HashMap::new()),
             title,
             paned,
             pages,
@@ -377,6 +405,8 @@ impl MainWindow {
         this.refresh_hints();
         this.connect_signals();
         this.watch_state(store.dir());
+        this.refresh_limits();
+        this.refresh_app_usage();
         this.detect_claude();
         this.refresh_layout_menu();
         this.reload(false);
@@ -385,6 +415,23 @@ impl MainWindow {
         match first {
             Some(first) if this.0.layout.borrow().sessions().is_empty() => this.open_session(&first),
             _ => this.render(true),
+        }
+        for problem in plugin_problems {
+            this.toast(&format!("Complemento no cargado. {problem}"));
+        }
+        if !this.0.plugins.is_empty() {
+            this.poll_plugins(true);
+            // Un tic por segundo mueve los cronómetros y consulta a cada
+            // complemento cuando le toca. Sin complementos no hay temporizador.
+            let weak = this.weak();
+            glib::timeout_add_seconds_local(1, move || {
+                let Some(inner) = weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                inner.sidebar.tick();
+                MainWindow(inner).poll_plugins(false);
+                glib::ControlFlow::Continue
+            });
         }
         Ok(this)
     }
@@ -503,6 +550,11 @@ impl MainWindow {
                 inner.ungrouped_collapsed.get(),
             );
             *inner.signature.borrow_mut() = Some(signature);
+            // Filas nuevas: hay que volver a ponerles lo de los complementos
+            // y preguntar por las sesiones que acaban de aparecer.
+            *inner.snapshot.borrow_mut() = snapshot.clone();
+            self.apply_plugin_extras();
+            self.poll_plugins(true);
         } else {
             inner.sidebar.update_status(&snapshot);
         }
@@ -537,6 +589,12 @@ impl MainWindow {
                 MainWindow(inner).take_backend_copy();
                 return;
             }
+            if name.starts_with(limits::LIMITS_MARK) {
+                if !temporary {
+                    MainWindow(inner).refresh_limits();
+                }
+                return;
+            }
             if temporary || inner.reload_pending.replace(true) {
                 return;
             }
@@ -549,6 +607,230 @@ impl MainWindow {
             });
         });
         *self.0.state_monitor.borrow_mut() = Some(watcher);
+    }
+
+    /// Las sesiones tal y como las ven los complementos.
+    fn plugin_sessions(&self) -> Vec<SessionInfo> {
+        let snapshot = self.0.snapshot.borrow();
+        snapshot
+            .sessions
+            .iter()
+            .map(|view| {
+                let group = view
+                    .session
+                    .group_id
+                    .and_then(|id| snapshot.groups.iter().find(|g| g.id == id))
+                    .map(|g| g.name.as_str());
+                let project = view
+                    .session
+                    .project_id
+                    .and_then(|id| snapshot.projects.iter().find(|p| p.id == id))
+                    .map(|p| p.name.as_str());
+                SessionInfo::from_view(view, group, project)
+            })
+            .collect()
+    }
+
+    /// Consulta el estado a los complementos a los que les toca. Con `force`
+    /// no espera a que venza su intervalo. Cada consulta corre fuera del hilo
+    /// de la interfaz.
+    fn poll_plugins(&self, force: bool) {
+        let inner = &self.0;
+        if inner.plugins.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut sessions = None;
+        for plugin in &inner.plugins {
+            let due = inner.plugin_due.borrow().get(&plugin.id).is_none_or(|at| now >= *at);
+            if !(force || due) || !inner.plugin_busy.borrow_mut().insert(plugin.id.clone()) {
+                continue;
+            }
+            inner
+                .plugin_due
+                .borrow_mut()
+                .insert(plugin.id.clone(), now + Duration::from_secs(plugin.interval));
+            let sessions = sessions.get_or_insert_with(|| self.plugin_sessions()).clone();
+            let (plugin, weak) = (plugin.clone(), self.weak());
+            glib::spawn_future_local(async move {
+                let job = plugin.clone();
+                let result = gio::spawn_blocking(move || job.status(&sessions)).await;
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                inner.plugin_busy.borrow_mut().remove(&plugin.id);
+                if let Ok(status) = result {
+                    MainWindow(inner).plugin_answered(&plugin, status);
+                }
+            });
+        }
+    }
+
+    /// Guarda la respuesta de un complemento y la lleva a la barra lateral.
+    /// Si falló se conserva lo último que dijo y se avisa una sola vez.
+    fn plugin_answered(&self, plugin: &Plugin, status: alarviterm_core::Result<PluginStatus>) {
+        let inner = &self.0;
+        let error = match status {
+            Ok(status) => {
+                let error = status.error.clone();
+                inner.plugin_status.borrow_mut().insert(plugin.id.clone(), status);
+                error.map(|e| format!("{}: {e}", plugin.name))
+            }
+            Err(e) => Some(e.to_string()),
+        };
+        let changed = {
+            let mut errors = inner.plugin_errors.borrow_mut();
+            match &error {
+                Some(text) => errors.insert(plugin.id.clone(), text.clone()).as_ref() != Some(text),
+                None => {
+                    errors.remove(&plugin.id);
+                    false
+                }
+            }
+        };
+        if let Some(text) = error.filter(|_| changed) {
+            self.toast(&text);
+        }
+        self.apply_plugin_extras();
+    }
+
+    /// Reparte en las filas de la barra lateral lo que dijo cada complemento.
+    fn apply_plugin_extras(&self) {
+        let inner = &self.0;
+        if inner.plugins.is_empty() {
+            return;
+        }
+        let statuses = inner.plugin_status.borrow();
+        let mut extras: HashMap<String, Vec<RowExtra>> = HashMap::new();
+        for plugin in &inner.plugins {
+            let Some(status) = statuses.get(&plugin.id) else {
+                continue;
+            };
+            for (session, entry) in &status.sessions {
+                extras.entry(session.clone()).or_default().push(RowExtra {
+                    badge: entry.badge.clone(),
+                    tone: entry.tone,
+                    timer_since: entry.timer_since,
+                    tooltip: entry.tooltip.clone().or_else(|| Some(plugin.name.clone())),
+                    buttons: entry
+                        .actions
+                        .iter()
+                        .filter(|action| action.button)
+                        .map(|action| RowButton {
+                            label: action.label.clone(),
+                            icon: action.icon.clone(),
+                            target: plugin_target(&action.id, session, &plugin.id),
+                        })
+                        .collect(),
+                });
+            }
+        }
+        inner.sidebar.set_extras(&extras);
+    }
+
+    /// Ejecuta una acción de un complemento sobre una sesión y, con su
+    /// respuesta, vuelve a pedirle el estado.
+    fn plugin_action(&self, target: &str) {
+        let mut parts = target.splitn(3, '|');
+        let (Some(action), Some(session), Some(plugin_id)) = (parts.next(), parts.next(), parts.next()) else {
+            return;
+        };
+        let inner = &self.0;
+        let Some(plugin) = inner.plugins.iter().find(|p| p.id == plugin_id).cloned() else {
+            return;
+        };
+        let sessions = self.plugin_sessions();
+        let Some(info) = sessions.iter().find(|s| s.id == session).cloned() else {
+            return;
+        };
+        let (action, weak) = (action.to_string(), self.weak());
+        glib::spawn_future_local(async move {
+            let job = plugin.clone();
+            let result = gio::spawn_blocking(move || {
+                let outcome = job.act(&action, &info);
+                (outcome, job.status(&sessions))
+            })
+            .await;
+            let (Some(inner), Ok((outcome, status))) = (weak.upgrade(), result) else {
+                return;
+            };
+            let this = MainWindow(inner);
+            match outcome {
+                Ok(outcome) => {
+                    if let Some(message) = &outcome.message {
+                        this.0.toasts.add_toast(adw::Toast::new(message));
+                    } else if !outcome.ok {
+                        this.toast(&format!("{}: la acción no se pudo completar.", plugin.name));
+                    }
+                    if let Some(url) = &outcome.open_url {
+                        gtk::UriLauncher::new(url).launch(Some(&this.0.window), gio::Cancellable::NONE, |result| {
+                            if let Err(e) = result {
+                                log::warn!("no se pudo abrir la dirección: {e}");
+                            }
+                        });
+                    }
+                }
+                Err(e) => this.toast(&e.to_string()),
+            }
+            this.plugin_answered(&plugin, status);
+        });
+    }
+
+    /// Acciones que los complementos ofrecen para una sesión, con el nombre
+    /// del complemento, su etiqueta y el parámetro de `win.plugin-action`.
+    fn plugin_actions_for(&self, session: &str) -> Vec<(String, String, String)> {
+        let inner = &self.0;
+        let statuses = inner.plugin_status.borrow();
+        let mut found = Vec::new();
+        for plugin in &inner.plugins {
+            let actions = statuses
+                .get(&plugin.id)
+                .and_then(|status| status.sessions.get(session))
+                .map(|entry| entry.actions.as_slice())
+                .unwrap_or_default();
+            for action in actions {
+                found.push((
+                    plugin.name.clone(),
+                    action.label.clone(),
+                    plugin_target(&action.id, session, &plugin.id),
+                ));
+            }
+        }
+        found
+    }
+
+    /// Mide lo que consume la propia aplicación y lo lleva al pie. La lectura
+    /// de `/proc` corre fuera del hilo de la interfaz.
+    fn refresh_app_usage(&self) {
+        if !self.0.settings.borrow().footer_usage {
+            self.0.footer.set_app_usage(None);
+            return;
+        }
+        let weak = self.weak();
+        glib::spawn_future_local(async move {
+            let result = gio::spawn_blocking(sysinfo::self_usage).await;
+            let (Some(inner), Ok(Some(usage))) = (weak.upgrade(), result) else {
+                return;
+            };
+            let now = Instant::now();
+            let cpu = inner.app_sample.replace(Some((usage.cpu_ticks, now))).and_then(|(ticks, at)| {
+                sysinfo::cpu_percent(ticks, usage.cpu_ticks, now.duration_since(at).as_secs_f64())
+            });
+            inner.footer.set_app_usage(Some((usage, cpu)));
+        });
+    }
+
+    /// Muestra en el pie los límites de uso que dejó la última línea de
+    /// estado de alguna sesión, si el usuario quiere verlos.
+    fn refresh_limits(&self) {
+        let inner = &self.0;
+        let limits = inner
+            .settings
+            .borrow()
+            .account_limits
+            .then(|| limits::read(&inner.state_dir))
+            .flatten();
+        inner.footer.set_limits(limits.as_ref(), alarviterm_core::now_unix());
     }
 
     /// Lleva al portapapeles del sistema lo que se acaba de copiar dentro de
@@ -1240,6 +1522,7 @@ impl MainWindow {
     }
 
     fn install_actions(&self) {
+        self.add_target_action("plugin-action", |this, target| this.plugin_action(target));
         self.add_action("new-session", |this| this.new_session_dialog(None));
         self.add_action("new-terminal", |this| this.new_terminal());
         self.add_action("new-group", |this| this.new_group_dialog());
@@ -1282,6 +1565,7 @@ impl MainWindow {
         }
         self.add_target_action("session-open", |this, id| this.open_session(id));
         self.add_action("settings", |this| this.show_settings());
+        self.add_action("stats", |this| this.show_stats());
         self.add_action("projects", |this| this.show_projects());
         self.add_action("current-archive", |this| match this.selected() {
             Some(id) => this.set_archived(&id, true),
@@ -1554,6 +1838,18 @@ impl MainWindow {
             });
         }
 
+        if let Some(view) = &current {
+            for (plugin, label, target) in self.plugin_actions_for(&view.session.id) {
+                commands.push(Command {
+                    title: format!("{plugin}: {label}"),
+                    hint: format!("Complemento, {}", view.session.name),
+                    shortcut: None,
+                    action: "plugin-action".to_string(),
+                    target: Some(target),
+                });
+            }
+        }
+
         let group_name = |id: Option<i64>| {
             id.and_then(|id| snapshot.groups.iter().find(|g| g.id == id))
                 .map(|g| g.name.clone())
@@ -1671,6 +1967,16 @@ impl MainWindow {
 
     // Ajustes y proyectos
 
+    fn show_stats(&self) {
+        let inner = &self.0;
+        let Some(data_dir) = inner.state_dir.parent() else {
+            return;
+        };
+        let cache = Paths::at(data_dir.to_path_buf()).stats_cache();
+        let dialog = stats::show(&inner.window, inner.stats_library.clone(), cache);
+        self.refocus_after(&dialog);
+    }
+
     fn show_settings(&self) {
         let on_change = self.handler(|this, ()| this.apply_settings());
         let on_rename = self.handler(|this, (old, new): (String, String)| {
@@ -1710,6 +2016,21 @@ impl MainWindow {
                 self.toast(&e.to_string());
             }
         }
+        // Las sesiones nuevas llevarán o no la línea de estado que recoge los
+        // límites. Las que ya corren conservan lo que tenían al arrancar.
+        if let (Some(hook), Some(data_dir)) = (monitor::find_hook_binary(), inner.state_dir.parent()) {
+            let file = Paths::at(data_dir.to_path_buf()).hook_settings();
+            match monitor::hook_settings(&hook, settings.account_limits) {
+                Ok(text) => {
+                    if let Err(e) = std::fs::write(&file, text) {
+                        self.toast(&format!("No se pudieron guardar los ajustes de hooks: {e}"));
+                    }
+                }
+                Err(e) => self.toast(&e.to_string()),
+            }
+        }
+        self.refresh_limits();
+        self.refresh_app_usage();
         self.detect_claude();
         self.restyle_terminals();
         // El orden pudo cambiar: se fuerza a rehacer la lista.
@@ -1984,6 +2305,9 @@ impl MainWindow {
             let Some(inner) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
+            // La cuenta atrás de los límites avanza aunque nada cambie.
+            MainWindow(inner.clone()).refresh_limits();
+            MainWindow(inner.clone()).refresh_app_usage();
             if inner.window.is_active() {
                 MainWindow(inner).reload(false);
             }
@@ -2181,6 +2505,18 @@ impl MainWindow {
                     process.append_item(&sidebar::menu_item("Detener", "win.session-stop", &id));
                 }
                 menu.append_section(None, &process);
+
+                let extra = gio::Menu::new();
+                for (plugin, label, target) in self.plugin_actions_for(&id) {
+                    extra.append_item(&sidebar::menu_item(
+                        &format!("{plugin}: {label}"),
+                        "win.plugin-action",
+                        &target,
+                    ));
+                }
+                if extra.n_items() > 0 {
+                    menu.append_section(None, &extra);
+                }
 
                 let (projects, profiles, default_profile) = {
                     let settings = self.0.settings.borrow();
@@ -2437,6 +2773,12 @@ impl MainWindow {
 }
 
 /// Ventana mínima para explicar por qué la aplicación no puede arrancar.
+/// Parámetro de `win.plugin-action`. El complemento va al final porque su
+/// identificador es un nombre de carpeta y puede llevar cualquier carácter.
+fn plugin_target(action: &str, session: &str, plugin: &str) -> String {
+    format!("{action}|{session}|{plugin}")
+}
+
 fn tmux_options(settings: &Settings, state_dir: &std::path::Path) -> TmuxOptions {
     TmuxOptions {
         history_limit: settings.history_limit,

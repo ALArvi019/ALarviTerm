@@ -307,8 +307,12 @@ pub fn valid_session_id(id: &str) -> bool {
 }
 
 /// Contenido del fichero de ajustes que registra `alarviterm-hook` en Claude
-/// Code. Solo contiene hooks, así que se suma a los ajustes del usuario.
-pub fn hook_settings(hook_binary: &Path) -> Result<String> {
+/// Code. Los hooks se suman a los ajustes del usuario.
+///
+/// Con `statusline` registra además el hook como línea de estado, que es por
+/// donde Claude Code comunica los límites de uso de la cuenta. El hook ejecuta
+/// después la línea de estado del usuario, así que la suya se sigue viendo.
+pub fn hook_settings(hook_binary: &Path, statusline: bool) -> Result<String> {
     let command = shlex::try_quote(&hook_binary.to_string_lossy())
         .map_err(|_| crate::Error::Invalid("ruta del hook con un carácter nulo".into()))?
         .into_owned();
@@ -319,7 +323,14 @@ pub fn hook_settings(hook_binary: &Path) -> Result<String> {
             json!([{ "hooks": [{ "type": "command", "command": command, "timeout": 5 }] }]),
         );
     }
-    Ok(serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap_or_default())
+    let mut settings = json!({ "hooks": hooks });
+    if statusline {
+        settings["statusLine"] = json!({
+            "type": "command",
+            "command": format!("{command} {}", crate::limits::STATUSLINE_ARG),
+        });
+    }
+    Ok(serde_json::to_string_pretty(&settings).unwrap_or_default())
 }
 
 /// Localiza `alarviterm-hook`: la variable `ALARVITERM_HOOK_BIN`, junto al
@@ -522,7 +533,7 @@ mod tests {
 
     #[test]
     fn settings_register_every_event_with_a_quoted_command() {
-        let text = hook_settings(Path::new("/opt/mi app/alarviterm-hook")).expect("ajustes");
+        let text = hook_settings(Path::new("/opt/mi app/alarviterm-hook"), false).expect("ajustes");
         let value: Value = serde_json::from_str(&text).expect("json");
         let hooks = value.get("hooks").and_then(Value::as_object).expect("hooks");
         assert_eq!(hooks.len(), HOOK_EVENTS.len());
@@ -530,6 +541,15 @@ mod tests {
         assert_eq!(
             shlex::split(command).expect("se puede trocear"),
             vec!["/opt/mi app/alarviterm-hook"]
+        );
+        assert!(value.get("statusLine").is_none());
+
+        let text = hook_settings(Path::new("/opt/mi app/alarviterm-hook"), true).expect("ajustes");
+        let value: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(value["statusLine"]["type"], "command");
+        assert_eq!(
+            shlex::split(value["statusLine"]["command"].as_str().expect("comando")).expect("se puede trocear"),
+            vec!["/opt/mi app/alarviterm-hook", "statusline"]
         );
     }
 

@@ -11,5 +11,8 @@ Si encuentras un fallo de seguridad, no abras una incidencia pública. Usa el av
 * No lee ni guarda credenciales. Para saber si Claude Code tiene sesión iniciada solo comprueba que el fichero de credenciales existe, sin abrirlo.
 * No modifica `~/.claude/` ni la configuración global de tmux. Los hooks se registran por sesión con `claude --settings`.
 * No hace conexiones de red.
+* Para mostrar los límites de uso lee `~/.claude/settings.json`, sin modificarlo, y ejecuta la línea de estado que tengas configurada ahí, igual que haría Claude Code.
+* Para las estadísticas lee las transcripciones de `~/.claude/projects`, sin modificarlas. De ellas solo guarda cifras, horas, nombres de modelo y rutas de carpeta, en una caché local dentro de su carpeta de datos. No guarda el texto de las conversaciones.
+* Ejecuta los complementos que el usuario instale en `~/.config/alarviterm/plugins`, con sus mismos permisos. Solo abre direcciones `http` y `https` a petición de un complemento. Instala solo complementos en los que confíes.
 
 Las variables de entorno que se definan en una sesión o en un proyecto se guardan en claro en la base de datos local. No pongas secretos ahí si la carpeta de datos se comparte o se copia.

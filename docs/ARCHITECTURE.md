@@ -177,6 +177,32 @@ El binario busca `libvte-2.91-gtk4` primero en `../lib/alarviterm` respecto a s�
 
 Flatpak no encaja bien. ALarviTerm existe para lanzar el `claude`, el shell y el `tmux` del usuario, con su entorno y sus ficheros. Dentro del aislamiento de Flatpak habría que saltárselo para todo con `flatpak-spawn --host`, y lo que quedaría dentro sería solo la ventana. AppImage es viable pero obliga a empaquetar GTK 4, libadwaita y VTE, decenas de megabytes para una aplicación de uno y medio, y no resuelve la dependencia de tmux. Si hiciera falta salir de Debian y Ubuntu, AppImage sería la opción.
 
+### Límites de uso de la cuenta
+
+Claude Code entrega a su línea de estado, en cada actualización, el porcentaje consumido de las ventanas de 5 horas y de 7 días y la hora de reinicio. Es la única vía documentada para obtenerlos sin leer credenciales ni llamar a ningún servicio, así que se usa esa.
+
+El fichero de ajustes que se pasa a cada sesión con `--settings` registra `alarviterm-hook statusline` como línea de estado. Ese modo del hook hace dos cosas. Guarda los límites en `state/.limits`, solo si cambian, para no despertar a la aplicación en cada refresco. Después ejecuta la línea de estado de `~/.claude/settings.json` con la misma entrada y deja que escriba en la salida, de modo que el usuario ve la suya. La aplicación vigila el fichero y actualiza el pie sin recargar nada más.
+
+No se encadena la línea de estado de los ajustes de un proyecto. Claude Code solo la ejecuta cuando el usuario ha confiado en la carpeta, y el hook no puede saberlo.
+
+### Estadísticas de uso
+
+Claude Code no ofrece un resumen de uso que otro programa pueda consultar, pero guarda cada conversación en un fichero `.jsonl` y cada respuesta del modelo lleva sus tokens, su modelo, su hora y su carpeta. El panel se construye leyendo esos ficheros.
+
+El volumen manda en el diseño. Un mes de trabajo intenso son varios gigabytes, así que el lector (`stats.rs`) busca primero con `memchr` las líneas de respuesta y de usuario y solo analiza como JSON esas, reparte los ficheros entre varios hilos y guarda lo extraído de cada uno en una caché indexada por ruta, tamaño y fecha. Un fichero que no cambia no se vuelve a leer. Solo se abren los ficheros modificados dentro del periodo pedido y del anterior, que hace falta para comparar.
+
+Dos detalles evitan contar de más. Una respuesta se escribe en varias líneas con el mismo identificador, y al reanudar una conversación su historial se copia a otro fichero. Cada respuesta se identifica por su mensaje y su petición y cuenta una sola vez, dentro de un fichero y entre ficheros.
+
+El tiempo activo no está en los datos. Se estima sumando los huecos cortos entre eventos de una misma sesión, y el panel lo dice.
+
+### Complementos
+
+Las integraciones con herramientas de cada usuario no caben en la aplicación: dependen de servicios privados y de credenciales. La alternativa elegida es un contrato mínimo con programas externos, descrito en `docs/PLUGINS.md`. Un complemento responde a `status` con lo que quiere mostrar en cada sesión y a `action` con el resultado de una acción.
+
+Se descartó cargar bibliotecas dentro del proceso, porque un fallo del complemento tiraría la aplicación y obligaría a fijar una interfaz binaria. También se descartó usar MCP: está pensado para dar herramientas al modelo, no botones a la ventana. Un proceso por consulta cuesta poco con el intervalo mínimo de cinco segundos, corre fuera del hilo de la interfaz y tiene un tiempo máximo.
+
+El núcleo (`plugins.rs`) descubre los complementos, los ejecuta y valida las respuestas. La ventana guarda la última respuesta de cada uno y la reparte en la barra lateral, el menú contextual y la paleta. El cronómetro lo mueve la aplicación a partir de un instante de inicio, sin consultar cada segundo. Sin complementos instalados no hay ningún temporizador.
+
 ## Limitaciones conocidas del diseño
 
 * **Selección de texto**. Con el ratón activo en tmux, arrastrar selecciona dentro de tmux. Al soltar, tmux entrega el texto a su `copy-command`, que lo escribe en un fichero del directorio de estado. La aplicación ya vigila ese directorio, lleva el texto al portapapeles y borra el fichero. VTE no atiende la secuencia OSC 52, por eso no se usa. Para la selección nativa del terminal hay que mantener Mayús al arrastrar.

@@ -1,6 +1,6 @@
 # Hoja de ruta
 
-Estado a 21 de noviembre de 2026.
+Estado a 22 de noviembre de 2026.
 
 ## Fase 1. Investigación y arquitectura: hecha
 
@@ -116,7 +116,33 @@ Sin comprobar: instalar el `.deb`, porque requiere administrador. Se revisó su 
 
 Flatpak y AppImage, valorados y descartados por ahora. La explicación está en `docs/ARCHITECTURE.md`.
 
+## Fase 9. Límites de la cuenta y complementos: hecha
+
+Implementado y comprobado con la aplicación en marcha:
+
+* Límites de uso en el pie, con lo que queda de las ventanas de 5 horas y de 7 días y el tiempo hasta el reinicio. Se comprobó con una sesión real de Claude Code lanzada con la línea de estado encadenada: la línea de estado del usuario se siguió viendo igual y los límites reales quedaron guardados. El pie se comprobó con un fichero de límites escrito a mano: los medidores con barra, sus colores según lo que queda, la actualización al cambiar el fichero y el panel de detalle.
+* Consumo de la sesión activa con una gráfica diminuta de CPU. Se comprobó con un proceso que alterna carga y reposo.
+* Consumo de la propia aplicación en el pie. Se comprobó que la memoria que muestra coincide con la proporcional que da el sistema para el proceso.
+* Complementos externos con el contrato de `docs/PLUGINS.md`. Se comprobó con el de ejemplo: botón en la fila, acción, aviso, cronómetro que avanza, cambio del botón tras la acción y acción en la paleta.
+
+* Panel de estadísticas de uso. Se comprobó con transcripciones de demostración, incluido el cambio de periodo, y con las transcripciones reales de un equipo con unos 8 GB en dos meses: 10 segundos la primera lectura en modo release y sin relectura después.
+
+Sin comprobar con la aplicación en marcha:
+
+* El panel de estadísticas en el tema claro.
+* El pie con los límites llegando desde una sesión de Claude Code abierta dentro de ALarviTerm. Cada mitad se probó por separado.
+* El interruptor de Ajustes que apaga los límites.
+* Las acciones de complementos en el menú contextual, la apertura de una dirección web y el aviso de un complemento que falla. La lectura defensiva de las respuestas y el tiempo máximo tienen pruebas en el núcleo.
+
+Limitaciones:
+
+* Los complementos se leen al arrancar. Para añadir o quitar uno hay que reiniciar la aplicación.
+* La línea de estado de los ajustes de un proyecto no se encadena, solo la de los ajustes personales.
+
 ## Ideas para después
+
+* Estadísticas: coste estimado, filtro por carpeta al pulsar una fila y agrupar las subcarpetas de un mismo proyecto.
+* Recargar los complementos sin reiniciar y una página de ajustes que los liste.
 
 * Colores de las etiquetas de proyecto adaptados al tema claro.
 * Reordenar arrastrando con cualquier orden de lista.

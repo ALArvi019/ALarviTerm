@@ -7,6 +7,7 @@ use std::rc::Rc;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use alarviterm_core::model::Project;
+use alarviterm_core::plugins::{self, Tone};
 use alarviterm_core::search::{SessionFilter, StatusFilter};
 use alarviterm_core::sessions::{SessionView, Snapshot};
 
@@ -39,6 +40,26 @@ struct SessionRow {
     row: gtk::ListBoxRow,
     dot: gtk::Box,
     detail: gtk::Label,
+    /// Lo que añaden los complementos: etiqueta, cronómetro y botones.
+    extras: gtk::Box,
+}
+
+/// Lo que un complemento pone en la fila de una sesión.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RowExtra {
+    pub badge: Option<String>,
+    pub tone: Tone,
+    pub timer_since: Option<i64>,
+    pub tooltip: Option<String>,
+    pub buttons: Vec<RowButton>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowButton {
+    pub label: String,
+    pub icon: Option<String>,
+    /// Parámetro de la acción `win.plugin-action`.
+    pub target: String,
 }
 
 pub struct Sidebar {
@@ -54,6 +75,8 @@ pub struct Sidebar {
     search_toggle: gtk::ToggleButton,
     /// Texto de la lista vacía, que cita el atajo vigente.
     empty_hint: RefCell<String>,
+    /// Cronómetros de los complementos a la vista, con su instante de inicio.
+    timers: RefCell<Vec<(gtk::Label, i64)>>,
 }
 
 /// Qué hace la ventana con lo que ocurre en el buscador.
@@ -149,6 +172,7 @@ impl Sidebar {
             status,
             search_toggle,
             empty_hint: RefCell::new(String::new()),
+            timers: RefCell::new(Vec::new()),
         }
     }
 
@@ -373,6 +397,64 @@ impl Sidebar {
         }
     }
 
+    /// Pone en cada fila lo que los complementos dicen de su sesión. Hay que
+    /// llamarlo también tras `rebuild`, que crea las filas vacías.
+    pub fn set_extras(&self, extras: &HashMap<String, Vec<RowExtra>>) {
+        let now = alarviterm_core::now_unix();
+        let mut timers = Vec::new();
+        for (id, entry) in self.rows.borrow().iter() {
+            while let Some(child) = entry.extras.first_child() {
+                entry.extras.remove(&child);
+            }
+            for extra in extras.get(id).map(Vec::as_slice).unwrap_or_default() {
+                if let Some(text) = &extra.badge {
+                    let badge = gtk::Label::new(Some(text));
+                    badge.add_css_class("mt-plugin-badge");
+                    if let Some(class) = tone_class(extra.tone) {
+                        badge.add_css_class(class);
+                    }
+                    badge.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    badge.set_max_width_chars(12);
+                    badge.set_tooltip_text(extra.tooltip.as_deref());
+                    entry.extras.append(&badge);
+                }
+                for button in &extra.buttons {
+                    let widget = match &button.icon {
+                        Some(icon) => gtk::Button::from_icon_name(icon),
+                        None => gtk::Button::with_label(&button.label),
+                    };
+                    widget.add_css_class("flat");
+                    widget.add_css_class("mt-plugin-button");
+                    widget.set_valign(gtk::Align::Center);
+                    widget.set_focus_on_click(false);
+                    widget.set_tooltip_text(Some(&button.label));
+                    widget.set_action_name(Some("win.plugin-action"));
+                    widget.set_action_target_value(Some(&button.target.to_variant()));
+                    entry.extras.append(&widget);
+                }
+                if let Some(since) = extra.timer_since {
+                    let timer = gtk::Label::new(Some(&plugins::timer_text(since, now)));
+                    timer.add_css_class("mt-plugin-timer");
+                    timer.set_tooltip_text(extra.tooltip.as_deref());
+                    entry.extras.append(&timer);
+                    timers.push((timer, since));
+                }
+            }
+            entry.extras.set_visible(entry.extras.first_child().is_some());
+        }
+        *self.timers.borrow_mut() = timers;
+    }
+
+    /// Avanza los cronómetros. Devuelve si hay alguno a la vista.
+    pub fn tick(&self) -> bool {
+        let now = alarviterm_core::now_unix();
+        let timers = self.timers.borrow();
+        for (label, since) in timers.iter() {
+            label.set_text(&plugins::timer_text(*since, now));
+        }
+        !timers.is_empty()
+    }
+
     pub fn select(&self, id: Option<&str>) {
         let row = id.and_then(|id| self.rows.borrow().get(id).map(|r| r.row.clone()));
         self.list.select_row(row.as_ref());
@@ -460,9 +542,14 @@ fn session_row(view: &SessionView, project: Option<&Project>, now: i64) -> Sessi
     texts.append(&title);
     texts.append(&detail);
 
+    let extras = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    extras.set_valign(gtk::Align::Center);
+    extras.set_visible(false);
+
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     content.append(&dot);
     content.append(&texts);
+    content.append(&extras);
 
     let row = gtk::ListBoxRow::new();
     row.set_widget_name(&format!("s:{}", view.session.id));
@@ -474,7 +561,7 @@ fn session_row(view: &SessionView, project: Option<&Project>, now: i64) -> Sessi
 
     super::dnd::make_draggable(&row, &view.session.id);
 
-    let entry = SessionRow { row, dot, detail };
+    let entry = SessionRow { row, dot, detail, extras };
     apply_status(&entry, view, now);
     entry
 }
@@ -502,6 +589,15 @@ fn apply_status(entry: &SessionRow, view: &SessionView, now: i64) {
     entry.detail.set_text(&detail);
 
     entry.dot.set_tooltip_text(Some(&info.tooltip));
+}
+
+fn tone_class(tone: Tone) -> Option<&'static str> {
+    match tone {
+        Tone::Normal => None,
+        Tone::Ok => Some("t-ok"),
+        Tone::Warn => Some("t-warn"),
+        Tone::Muted => Some("t-muted"),
+    }
 }
 
 fn project_of<'a>(snapshot: &'a Snapshot, view: &SessionView) -> Option<&'a Project> {

@@ -9,6 +9,7 @@ pub mod prefs;
 pub mod projects;
 pub mod shortcuts;
 pub mod sidebar;
+pub mod stats;
 pub mod status;
 pub mod style;
 pub mod terminal;

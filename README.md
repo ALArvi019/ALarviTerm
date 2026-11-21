@@ -34,6 +34,9 @@ Hace falta Rust 1.85 o posterior, que se instala con [rustup](https://rustup.rs)
 * Sigue lo que hace cada Claude Code a partir de sus propios eventos: Pensando, Ejecutando una herramienta, Pide permiso, Esperando respuesta o Compactando.
 * Avisa con una notificación de escritorio cuando una sesión pide permiso o termina su turno y la ventana no está delante.
 * Muestra en el pie la rama de git y los cambios pendientes, el modelo que respondió y el consumo de CPU y memoria de la sesión activa.
+* Muestra lo que queda de los límites de uso de la cuenta, el de 5 horas y el de 7 días, con barras finas, y cuánto falta para que se reinicien.
+* Tiene un panel de estadísticas de uso de Claude Code: tokens, sesiones, tiempo activo, actividad por día y por hora, modelos y carpetas.
+* Admite complementos: programas externos que añaden a cada sesión una etiqueta, un cronómetro y acciones propias.
 * Ofrece una paleta de comandos con búsqueda sobre todas las acciones, las sesiones y las disposiciones.
 * Deja cambiar cualquier atajo de teclado y decidir si actúa también dentro del terminal.
 * Busca sesiones en la barra lateral por nombre, carpeta o grupo, y las filtra por estado.
@@ -92,6 +95,7 @@ Atajos de fábrica:
 
 * `Ctrl+Mayús+P`: paleta de comandos.
 * `Ctrl+,`: ajustes.
+* `Ctrl+Mayús+S`: estadísticas de uso.
 * `Ctrl+Mayús+N`: nueva sesión.
 * `Ctrl+Mayús+T`: terminal nuevo en el directorio de la sesión actual.
 * `Ctrl+Mayús+B`: mostrar u ocultar la barra lateral.
@@ -226,6 +230,7 @@ Variables de entorno útiles para desarrollo:
 * `ALARVITERM_DATA_DIR`: directorio de datos alternativo.
 * `ALARVITERM_TMUX_SOCKET`: nombre de socket alternativo.
 * `ALARVITERM_APP_ID`: identificador de aplicación alternativo, para abrir una segunda instancia aislada.
+* `ALARVITERM_PLUGINS_DIR`: carpeta de complementos alternativa.
 * `ALARVITERM_HOOK_BIN`: ruta de `alarviterm-hook` si no está junto a `alarviterm` ni en el PATH.
 * `ALARVITERM_LOG`: nivel de registro (`error`, `warn`, `info`, `debug`).
 
@@ -265,6 +270,50 @@ Ninguna de las dos borra tus datos. Para eliminarlos también:
 tmux -L alarviterm kill-server
 rm -rf ~/.local/share/alarviterm
 ```
+
+## Límites de uso de la cuenta
+
+El pie muestra un medidor por ventana: una barra fina con lo que queda, el porcentaje y el tiempo hasta el reinicio. La barra es verde, pasa a ámbar por debajo del 50 % y a rojo por debajo del 20 %. Al pulsar se abre un panel con el detalle: porcentaje usado, hora exacta del reinicio y antigüedad del dato.
+
+![Medidores del pie y panel de límites](docs/captura-limites.png)
+
+Junto a ellos hay dos medidores de consumo, cada uno con una gráfica diminuta de las últimas muestras de CPU, su valor y la memoria. El primero es el de la sesión activa. El segundo, con la etiqueta APP, es el de la propia aplicación sin contar las sesiones. Su memoria es la proporcional del proceso, que reparte las bibliotecas compartidas entre los programas que las usan, y el texto de ayuda da también la residente.
+
+El dato lo da el propio Claude Code a su línea de estado. ALarviTerm registra `alarviterm-hook statusline` como línea de estado de las sesiones que lanza, guarda los límites y a continuación ejecuta la línea de estado que tengas en `~/.claude/settings.json`, con la misma entrada, así que la tuya se ve como siempre. No se lee ninguna credencial ni se hace ninguna petición.
+
+A tener en cuenta:
+
+* Solo hay dato con una suscripción de Claude y después de la primera respuesta de alguna sesión. Se actualiza cuando una sesión responde.
+* Es de la cuenta, no de la sesión. Con sesiones de cuentas distintas se ve el de la última que respondió.
+* Una línea de estado definida en los ajustes de un proyecto no se ejecuta, solo la de tus ajustes personales. Tampoco se copian sus opciones `padding` y `refreshInterval`.
+* Se apaga en Ajustes, Pie de la ventana, Límites de la cuenta. El cambio vale para las sesiones que se inicien después.
+
+## Estadísticas de uso
+
+`Ctrl+Mayús+S`, o Estadísticas de uso en el menú de la cabecera, abre un panel con el consumo de Claude Code en los últimos 7, 30 o 90 días, o en todo el historial.
+
+![Panel de estadísticas con datos de demostración](docs/captura-estadisticas.png)
+
+* Cuatro tarjetas: tokens de entrada con la parte leída de caché, tokens de salida, sesiones con sus turnos y respuestas, y tiempo activo. Cada una lleva su evolución por día y el cambio respecto al periodo anterior.
+* Tokens por día, con la entrada hacia arriba y la salida hacia abajo, cada una con su escala.
+* Un mapa de la actividad por día de la semana y hora.
+* El desglose por modelo y por carpeta de trabajo.
+
+Los datos salen de las transcripciones que Claude Code guarda en `~/.claude/projects`. Solo se leen. A tener en cuenta:
+
+* Cuentan todas las sesiones de Claude Code del equipo, no solo las abiertas desde ALarviTerm.
+* Son tokens, no dinero. La aplicación no conoce precios ni planes.
+* El tiempo activo es una estimación: suma los huecos de menos de cinco minutos entre mensajes seguidos de una misma sesión.
+* La primera lectura puede tardar. Con unos 8 GB de transcripciones fueron 10 segundos. Después solo se leen los ficheros que cambian, gracias a una caché en `~/.local/share/alarviterm/stats-cache.json` que se puede borrar sin perder nada.
+* Si Claude Code borra transcripciones antiguas, ese uso deja de contarse.
+
+## Complementos
+
+Un complemento es una carpeta en `~/.config/alarviterm/plugins` con un programa que habla JSON por la entrada y la salida estándar. Añade a cada sesión una etiqueta, un cronómetro y acciones, que aparecen en la barra lateral, en el menú contextual y en la paleta. Sirve para conectar con un control de horas o un gestor de tareas sin meter su código en la aplicación.
+
+![Dos sesiones con el complemento de ejemplo](docs/captura-complementos.png)
+
+El contrato y un ejemplo completo están en [docs/PLUGINS.md](docs/PLUGINS.md).
 
 ## Pruebas
 

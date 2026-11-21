@@ -48,6 +48,11 @@ impl Paths {
         self.data_dir.join("state")
     }
 
+    /// Caché de las estadísticas de uso. Se puede borrar: se reconstruye.
+    pub fn stats_cache(&self) -> PathBuf {
+        self.data_dir.join("stats-cache.json")
+    }
+
     /// Ajustes que registran los hooks de ALarviTerm en Claude Code.
     pub fn hook_settings(&self) -> PathBuf {
         self.data_dir.join("claude-hooks.json")

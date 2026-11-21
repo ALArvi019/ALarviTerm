@@ -1,0 +1,6 @@
+{
+  "name": "Cronómetro",
+  "command": ["./cronometro.py"],
+  "interval": 30,
+  "timeout": 5
+}

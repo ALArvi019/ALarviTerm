@@ -162,9 +162,58 @@ pub fn cpu_percent(before: u64, after: u64, seconds: f64) -> Option<f64> {
     Some((after - before) as f64 / ticks_per_second() as f64 / seconds * 100.0)
 }
 
+/// Lo que consume la propia aplicación.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelfUsage {
+    /// Memoria proporcional del proceso: la suya más su parte de las
+    /// bibliotecas que comparte con otros programas. Es la cifra que mejor
+    /// dice lo que cuesta, porque la residente cuenta entera cada biblioteca.
+    pub pss_bytes: u64,
+    /// Memoria residente del proceso y de sus hijos.
+    pub rss_bytes: u64,
+    /// Tiempo de CPU del proceso y de sus hijos, en ticks del reloj.
+    pub cpu_ticks: u64,
+    /// El proceso y sus hijos, que son los clientes de terminal.
+    pub processes: usize,
+}
+
+/// Consumo de este proceso y de sus hijos.
+pub fn self_usage() -> Option<SelfUsage> {
+    let tree = tree_usage(std::process::id())?;
+    let rollup = std::fs::read_to_string("/proc/self/smaps_rollup").ok();
+    Some(SelfUsage {
+        pss_bytes: rollup.as_deref().and_then(parse_pss).unwrap_or(tree.rss_bytes),
+        rss_bytes: tree.rss_bytes,
+        cpu_ticks: tree.cpu_ticks,
+        processes: tree.processes,
+    })
+}
+
+/// Memoria proporcional, en bytes, de un `smaps_rollup`.
+pub fn parse_pss(rollup: &str) -> Option<u64> {
+    let line = rollup.lines().find(|l| l.starts_with("Pss:"))?;
+    let kilobytes: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kilobytes * 1024)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pss_is_read_from_the_rollup() {
+        let text = "55d0-7ffd ---p 00000000 00:00 0 [rollup]\nRss:  152340 kB\nPss:   61024 kB\nPss_Dirty: 30000 kB\n";
+        assert_eq!(parse_pss(text), Some(61024 * 1024));
+        assert_eq!(parse_pss("Rss: 10 kB\n"), None);
+        assert_eq!(parse_pss("Pss: mucho kB\n"), None);
+    }
+
+    #[test]
+    fn own_usage_counts_at_least_this_process() {
+        let usage = self_usage().expect("consumo propio");
+        assert!(usage.processes >= 1);
+        assert!(usage.pss_bytes > 0 && usage.rss_bytes > 0);
+    }
 
     #[test]
     fn git_status_with_branch_and_changes() {

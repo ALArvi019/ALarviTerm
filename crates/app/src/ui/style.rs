@@ -161,6 +161,94 @@ headerbar {
   color: @mt_amber;
 }
 
+.mt-stat-caption {
+  font-size: 0.82em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: @mt_gray;
+}
+.mt-stat-value {
+  color: @window_fg_color;
+}
+.mt-stat-note {
+  color: @mt_dim;
+}
+.mt-spark {
+  color: @mt_blue;
+}
+.mt-footer menubutton.mt-stat-button > button {
+  min-height: 20px;
+  padding: 0 6px;
+  margin: 1px 0;
+  font-weight: normal;
+}
+progressbar.mt-meter > trough {
+  min-width: 46px;
+  min-height: 4px;
+  border-radius: 2px;
+  background-color: @mt_tint;
+}
+progressbar.mt-meter > trough > progress {
+  min-height: 4px;
+  border-radius: 2px;
+  background-color: @mt_green;
+}
+progressbar.mt-meter.l-warn > trough > progress { background-color: @mt_amber; }
+progressbar.mt-meter.l-crit > trough > progress { background-color: @mt_red; }
+progressbar.mt-meter-big > trough,
+progressbar.mt-meter-big > trough > progress {
+  min-height: 7px;
+  border-radius: 4px;
+}
+progressbar.mt-meter-big > trough { min-width: 260px; }
+.mt-stat-panel {
+  padding: 8px 6px;
+}
+.mt-stat-heading {
+  font-weight: 700;
+}
+.mt-stat-big {
+  font-weight: 700;
+}
+
+.mt-stats {
+  padding: 18px 22px 16px 22px;
+}
+.mt-card {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background-color: @card_bg_color;
+}
+.mt-card-value {
+  font-size: 1.9em;
+  font-weight: 300;
+}
+.mt-delta {
+  min-height: 18px;
+  padding: 0 7px;
+  border-radius: 6px;
+  font-size: 0.8em;
+  font-weight: 600;
+  color: @mt_green;
+  background-color: alpha(@mt_green, 0.13);
+}
+.mt-delta.down {
+  color: @mt_soft;
+  background-color: @mt_tint;
+}
+.mt-chart {
+  color: @window_fg_color;
+}
+.mt-chart-out {
+  color: @mt_blue;
+}
+.mt-stat-number {
+  font-family: monospace;
+  font-size: 0.88em;
+}
+progressbar.mt-meter-share > trough { min-width: 60px; }
+progressbar.mt-meter-share > trough > progress { background-color: @mt_soft; }
+
 .mt-pane-header {
   min-height: 28px;
   padding-right: 3px;
@@ -285,6 +373,29 @@ headerbar {
 .mt-project.c-purple { color: #bc8cff; }
 .mt-project.c-cyan { color: #39c5cf; }
 .mt-project.c-pink { color: #f778ba; }
+.mt-plugin-badge {
+  padding: 0 5px;
+  border-radius: 4px;
+  background-color: @mt_tint;
+  font-size: 0.74em;
+  font-weight: 600;
+  color: @mt_soft;
+}
+.mt-plugin-badge.t-ok { color: #3fb950; }
+.mt-plugin-badge.t-warn { color: #d29922; }
+.mt-plugin-badge.t-muted { color: @mt_dim; }
+.mt-plugin-timer {
+  font-family: monospace;
+  font-size: 0.8em;
+  color: #3fb950;
+}
+button.mt-plugin-button {
+  min-height: 20px;
+  min-width: 20px;
+  padding: 1px 3px;
+  font-size: 0.8em;
+}
+button.mt-plugin-button image { -gtk-icon-size: 13px; }
 .mt-archived .mt-session-name {
   color: @mt_dim;
   font-style: italic;

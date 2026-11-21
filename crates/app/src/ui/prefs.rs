@@ -126,13 +126,19 @@ pub fn show(
 
     let footer = adw::PreferencesGroup::builder()
         .title("Pie de la ventana")
-        .description("Datos de la sesión activa.")
+        .description("Datos de la sesión activa y de la cuenta.")
         .build();
     type Flag = fn(&mut Settings) -> &mut bool;
-    let footer_rows: [(&str, &str, bool, Flag); 3] = [
+    let footer_rows: [(&str, &str, bool, Flag); 4] = [
         ("Rama de git", "Rama y ficheros con cambios.", current.footer_git, |s| &mut s.footer_git),
         ("Modelo", "El que respondió en el último turno.", current.footer_model, |s| &mut s.footer_model),
-        ("Consumo", "CPU y memoria del árbol de procesos.", current.footer_usage, |s| &mut s.footer_usage),
+        ("Consumo", "CPU y memoria de la sesión activa y de la propia aplicación.", current.footer_usage, |s| &mut s.footer_usage),
+        (
+            "Límites de la cuenta",
+            "Lo que queda de las ventanas de 5 horas y de 7 días. Se aplica a las sesiones que se inicien después.",
+            current.account_limits,
+            |s| &mut s.account_limits,
+        ),
     ];
     let notice_rows: [(&str, &str, bool, Flag); 2] = [
         (
