@@ -1,0 +1,15 @@
+pub mod dialogs;
+pub mod dnd;
+pub mod footer;
+pub mod icons;
+pub mod keys;
+pub mod palette;
+pub mod panes;
+pub mod prefs;
+pub mod projects;
+pub mod shortcuts;
+pub mod sidebar;
+pub mod status;
+pub mod style;
+pub mod terminal;
+pub mod window;

@@ -1,0 +1,299 @@
+# ALarviTerm
+
+Centro de control nativo para sesiones de Claude Code en Linux. Escrito en Rust con GTK4, libadwaita y VTE, con tmux manteniendo vivos los procesos.
+
+Cada sesión es un proceso real en una terminal real. Si cierras la ventana, Claude Code sigue trabajando, y al volver a abrirla te reconectas donde estaba.
+
+![Ventana principal con dos paneles](docs/captura-paneles.png)
+
+Estado actual: versión 0.1.0, funcional y en desarrollo. El detalle de lo hecho, lo comprobado y lo pendiente está en [ROADMAP.md](ROADMAP.md). Las decisiones técnicas están en [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) y los cambios de cada versión en [CHANGELOG.md](CHANGELOG.md).
+
+## Instalación rápida
+
+En Ubuntu 24.04, Kubuntu 24.04 o Debian 13:
+
+```sh
+sudo apt install build-essential pkg-config tmux \
+  libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libsqlite3-dev
+git clone https://github.com/ALArvi019/ALarviTerm.git
+cd ALarviTerm
+./scripts/install.sh
+```
+
+Hace falta Rust 1.85 o posterior, que se instala con [rustup](https://rustup.rs). El script compila y deja la aplicación en `~/.local`, con su entrada en el menú. Después se abre desde el menú de aplicaciones o con `alarviterm` en una terminal. Las secciones [Requisitos](#requisitos) e [Instalar](#instalar) dan el detalle y la alternativa con paquete `.deb`.
+
+## Qué hace hoy
+
+* Crea sesiones de Claude Code o de shell en cualquier directorio, con nombre, grupo, modelo, argumentos y variables de entorno.
+* Muestra cada sesión en un terminal VTE completo: color verdadero, Unicode, ratón y aplicaciones a pantalla completa.
+* Agrupa las sesiones en una barra lateral con grupos plegables, y permite reordenarlas arrastrando.
+* Divide la ventana en paneles, en horizontal y en vertical, sin límite fijo. Cada panel tiene pestañas.
+* Mueve sesiones entre paneles arrastrando su pestaña o su fila de la barra lateral. Soltar en un borde divide el panel hacia ese lado.
+* Maximiza un panel y lo restaura. Guarda disposiciones con nombre y las recupera.
+* Indica el estado real de cada proceso: Activa, Terminada, Error con su código, o Desconectada.
+* Sigue lo que hace cada Claude Code a partir de sus propios eventos: Pensando, Ejecutando una herramienta, Pide permiso, Esperando respuesta o Compactando.
+* Avisa con una notificación de escritorio cuando una sesión pide permiso o termina su turno y la ventana no está delante.
+* Muestra en el pie la rama de git y los cambios pendientes, el modelo que respondió y el consumo de CPU y memoria de la sesión activa.
+* Ofrece una paleta de comandos con búsqueda sobre todas las acciones, las sesiones y las disposiciones.
+* Deja cambiar cualquier atajo de teclado y decidir si actúa también dentro del terminal.
+* Busca sesiones en la barra lateral por nombre, carpeta o grupo, y las filtra por estado.
+* Define proyectos: una carpeta con nombre, color, icono, variables de entorno y un comando de inicio que heredan sus sesiones.
+* Tiene ventana de ajustes: tema oscuro, claro o del sistema, perfiles de terminal, historial, ejecutables, contenido del pie y notificaciones.
+* Archiva las sesiones que no quieres ver y ordena la lista por actividad, nombre o fecha.
+* Mantiene las sesiones vivas al cerrar la aplicación y las recupera al abrirla.
+* Permite renombrar, mover de grupo, reiniciar, detener y eliminar sesiones.
+* Recuerda tamaño de ventana, barra lateral y disposición de paneles.
+
+Se instala con un script en la carpeta del usuario o con un paquete `.deb`.
+
+## Requisitos
+
+* Rust 1.85 o posterior.
+* GTK 4.14, libadwaita 1.5 y VTE 0.76 para GTK4, o versiones posteriores.
+* SQLite 3.
+* tmux 3.2 o posterior.
+* Claude Code en el `PATH` para las sesiones de ese tipo.
+
+Ubuntu, Kubuntu y Debian:
+
+```sh
+sudo apt install build-essential pkg-config tmux \
+  libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libsqlite3-dev
+```
+
+Fedora:
+
+```sh
+sudo dnf install gcc pkg-config tmux \
+  gtk4-devel libadwaita-devel vte291-gtk4-devel sqlite-devel
+```
+
+## Compilar y ejecutar
+
+```sh
+cargo build --release
+./target/release/alarviterm
+```
+
+### Sin permisos de administrador
+
+Si no puedes instalar los paquetes de desarrollo en el sistema, el repositorio también se compila contra una copia local en `.sysroot/root`, extraída de los mismos paquetes de la distribución con `dpkg -x` y fuera del control de versiones. El script `scripts/dev.sh` prepara el entorno cuando esa carpeta existe:
+
+```sh
+./scripts/dev.sh cargo build --release
+./target/release/alarviterm
+```
+
+El binario generado así lleva la ruta de `.sysroot/runtime` para encontrar `libvte-2.91-gtk4`, que es la única biblioteca que el sistema no trae. Al instalar los paquetes con `apt`, borra `.sysroot/` y compila con `cargo` directamente.
+
+## Uso
+
+Atajos de fábrica:
+
+* `Ctrl+Mayús+P`: paleta de comandos.
+* `Ctrl+,`: ajustes.
+* `Ctrl+Mayús+N`: nueva sesión.
+* `Ctrl+Mayús+T`: terminal nuevo en el directorio de la sesión actual.
+* `Ctrl+Mayús+B`: mostrar u ocultar la barra lateral.
+* `Ctrl+Mayús+F`: buscar y filtrar sesiones en la barra lateral.
+* `Ctrl+Tab` y `Ctrl+Mayús+Tab`: sesión siguiente y anterior.
+* `Ctrl+1` a `Ctrl+9`: ir a la sesión de esa posición.
+* `Ctrl+Mayús+A`: ir a la siguiente sesión en la que Claude Code te espera. Primero las que piden permiso.
+* `Ctrl+Mayús+R`: renombrar la sesión actual.
+* `Ctrl+Mayús+D` y `Ctrl+Mayús+E`: dividir el panel a la derecha y hacia abajo.
+* `Ctrl+Mayús+Flechas`: mover el foco al panel de ese lado.
+* `Ctrl+Mayús+Intro`: maximizar o restaurar el panel.
+* `Ctrl+AvPág` y `Ctrl+RePág`: pestaña siguiente y anterior del panel.
+* `Ctrl+Mayús+W`: cerrar la pestaña. Con el panel ya vacío, cerrar el panel.
+* `Ctrl+Mayús+C` y `Ctrl+Mayús+V`: copiar y pegar en el terminal. Son del terminal y no se pueden cambiar.
+* Seleccionar con el ratón copia al portapapeles del sistema al soltar el botón.
+* `Mayús+Intro`: salto de línea en Claude Code.
+
+`Ctrl+N` y `Ctrl+B` también funcionan cuando el foco no está en un terminal. Dentro de un terminal pertenecen al shell y a Claude Code, y ALarviTerm no los intercepta.
+
+### Paleta de comandos
+
+`Ctrl+Mayús+P`, o el botón de la lupa de la cabecera, abre un cuadro de búsqueda con todo lo que la aplicación sabe hacer: las acciones con su atajo, ir a cualquier sesión, mover la sesión actual a otro grupo, aplicar una disposición y filtrar la barra lateral. La búsqueda no distingue mayúsculas ni tildes, admite varias palabras en cualquier orden y acepta iniciales, por ejemplo `nse` para Nueva sesión. Las flechas eligen, Intro ejecuta y Esc cierra.
+
+![Paleta de comandos](docs/captura-paleta.png)
+
+### Cambiar los atajos
+
+En el menú de la cabecera, Atajos de teclado. También está en la paleta. Al pulsar una acción se pide la combinación nueva. El diálogo avisa si otra acción ya la usa, que en ese caso la pierde, y si es una combinación que los programas de terminal suelen necesitar.
+
+Cada atajo indica si vale también con el foco en un terminal. Los que llevan Ctrl+Mayús o Súper valen ahí de fábrica. Uno como `Ctrl+G` queda limitado a cuando el foco está fuera del terminal, salvo que marques la casilla, y entonces el shell y Claude Code dejan de recibirlo. Una acción puede tener varios atajos, y cada una se puede devolver a su valor de fábrica. Solo se guardan las diferencias, en la base de datos.
+
+Con un diálogo abierto los atajos no actúan.
+
+### Buscar y filtrar sesiones
+
+`Ctrl+Mayús+F`, o la lupa de la barra lateral, abre el buscador. Filtra mientras escribes por nombre, carpeta o nombre del grupo. El desplegable limita la lista a las sesiones activas, a las que te esperan o a las paradas. Con un filtro puesto se ocultan los grupos sin coincidencias y los demás se muestran abiertos. Intro abre la primera coincidencia y Esc cierra el buscador y quita el filtro.
+
+Con el botón derecho sobre una sesión o un grupo aparece su menú. Un clic en la cabecera de un grupo lo pliega.
+
+### Paneles y pestañas
+
+Un clic en una sesión de la barra lateral la abre como pestaña en el panel con foco. Si ya está abierta en otro panel, lleva el foco allí. Una sesión se muestra en un solo panel a la vez.
+
+Cerrar una pestaña no detiene la sesión: el proceso sigue en marcha y se puede volver a abrir desde la barra lateral. Para terminar el proceso está Detener, en el menú de la sesión.
+
+Doble clic en una sesión de la barra lateral, o en una pestaña, maximiza su panel. El botón de la cuadrícula en la cabecera ofrece disposiciones predefinidas y permite guardar la actual con un nombre.
+
+Para seleccionar texto con el ratón mantén pulsada `Mayús` mientras arrastras. La rueda recorre el historial.
+
+### Proyectos
+
+Un proyecto es una carpeta con nombre. Se gestionan desde el menú de la cabecera, Proyectos, o desde la paleta. Cada uno tiene:
+
+* Un color y un icono de uno o dos caracteres, que forman la etiqueta que sus sesiones llevan en la barra lateral.
+* Variables de entorno, que heredan sus sesiones. Si una sesión define la misma variable, gana la de la sesión.
+* Un comando de inicio, que se ejecuta en el shell justo antes de cada sesión. Sirve para activar un entorno virtual o elegir una versión de Node. Si falla, la sesión no arranca y el error queda a la vista en el terminal.
+
+Para crear una sesión dentro de un proyecto, elígelo en el formulario de sesión nueva, pulsa el botón de añadir de su fila en la lista de proyectos, o escribe su nombre en la paleta. Un terminal nuevo nace en el proyecto de la sesión actual. Desde el menú de una sesión se puede cambiar de proyecto, y el entorno nuevo vale a partir de su siguiente reinicio. El buscador de la barra lateral también encuentra por nombre de proyecto. Borrar un proyecto no borra sus sesiones.
+
+### Ajustes
+
+`Ctrl+,` o el menú de la cabecera. Cada cambio se aplica y se guarda al momento.
+
+![Ajustes, página de terminal](docs/captura-ajustes.png)
+
+* **Tema**: oscuro, claro o el del sistema.
+* **Orden de las sesiones** dentro de cada grupo: manual, por actividad reciente, por nombre o por fecha de creación. Arrastrar solo reordena con el orden manual.
+* **Pie de la ventana**: mostrar u ocultar la rama de git, el modelo y el consumo.
+* **Notificaciones**: avisar o no cuando una sesión pide permiso y cuando termina su turno.
+* **Perfiles de terminal**: fuente, colores, forma del cursor y parpadeo. Hay cuatro juegos de colores, además del que sigue al tema. Un perfil es el predeterminado y cada sesión puede elegir otro desde su menú. Los cambios se ven en los terminales abiertos.
+* **Historial**: líneas que tmux guarda por sesión. Vale para las sesiones que se lancen después.
+* **Programas**: ruta del ejecutable de Claude Code, modelo propuesto al crear sesiones y shell.
+
+### Archivar sesiones
+
+Archivar, en el menú de una sesión o en la paleta, la quita de la lista sin tocar su proceso. Las archivadas se ven con el filtro Archivadas del buscador, y desde ahí se desarchivan o se abren.
+
+## Estados
+
+Hay dos fuentes, y ninguna es una suposición.
+
+Lo que dice tmux sobre el proceso:
+
+* **Activa** (verde): el proceso existe. Se muestra hace cuánto escribió por última vez.
+* **Terminada** (gris): el proceso salió con código 0. Su salida sigue visible.
+* **Error** (rojo): el proceso salió con otro código.
+* **Desconectada** (contorno ámbar): tmux no tiene la sesión, porque se detuvo o porque el equipo se reinició. Se puede relanzar.
+
+Lo que cuenta el propio Claude Code mientras está activo:
+
+* **Lista** (verde): ha arrancado y espera la primera instrucción.
+* **Pensando** (azul): está procesando una petición.
+* **Ejecutando Bash**, o la herramienta que sea (azul).
+* **Pide permiso** (ámbar con halo): está detenido hasta que apruebes o respondas. El pie cuenta cuántas sesiones están así.
+* **Esperando respuesta** (verde): ha terminado su turno.
+* **Compactando** (azul): está resumiendo la conversación.
+
+ALarviTerm no lee la pantalla para adivinar nada. Una sesión de Claude Code que aún no ha enviado ningún evento se queda en Activa, por ejemplo mientras pregunta si confías en la carpeta.
+
+### Cómo funciona la monitorización
+
+Claude Code puede ejecutar un comando en cada evento (sus hooks). alarviterm genera un fichero de ajustes propio, `claude-hooks.json`, que registra el binario `alarviterm-hook` para esos eventos, y lanza cada sesión con `claude --settings <ese fichero>`. El binario anota el estado en un fichero por sesión y la aplicación vigila ese directorio.
+
+* No se modifica `~/.claude/settings.json` ni ningún otro fichero tuyo. Tus hooks siguen funcionando, porque los de varios ficheros se suman.
+* Para lanzar una sesión sin monitorizar basta con poner tu propio `--settings` en sus argumentos adicionales. En ese caso manda el tuyo.
+* Fuera de ALarviTerm el binario no hace nada: sin sus variables de entorno termina sin escribir.
+* `alarviterm-hook` debe estar junto al binario `alarviterm`, en el PATH o indicado en `ALARVITERM_HOOK_BIN`. Si no se encuentra, las sesiones se lanzan sin monitorización y solo se ven los estados de tmux.
+* Las sesiones lanzadas con una versión anterior no tienen hooks hasta que se reinician.
+
+### Límites de lo que se puede saber
+
+* Claude Code no avisa en el momento de conceder un permiso. Tras aprobar, la sesión sigue en Pide permiso hasta que la herramienta termina.
+* Si interrumpes un turno con Esc no llega ningún evento. La sesión sigue en Pensando hasta el aviso de inactividad de Claude Code, que tarda alrededor de un minuto.
+* El modelo del pie es el del último turno terminado, leído de la transcripción. Antes del primer turno no se muestra.
+
+### Reanudar una conversación
+
+Reiniciar continuando la conversación usa `claude --resume` con el identificador exacto que la sesión comunicó por sus hooks. Así no se confunde con otra conversación del mismo directorio. Si la sesión nunca envió eventos se recurre a `claude --continue`, que toma la más reciente del directorio.
+
+## Dónde guarda las cosas
+
+* `~/.local/share/alarviterm/alarviterm.db`: grupos, sesiones y ajustes.
+* `~/.local/share/alarviterm/tmux.conf`: configuración del servidor tmux propio. Se regenera en cada arranque.
+* `~/.local/share/alarviterm/claude-hooks.json`: ajustes que registran `alarviterm-hook` en las sesiones de Claude Code. Se regenera en cada arranque.
+* `~/.local/share/alarviterm/state/`: último estado comunicado por cada sesión. Por aquí pasa también, un instante, el texto que copias con el ratón: tmux lo deja en un fichero y alarviterm lo borra en cuanto lo lleva al portapapeles.
+* Servidor tmux en el socket `alarviterm`. Se puede inspeccionar con `tmux -L alarviterm ls`.
+
+ALarviTerm no modifica `~/.tmux.conf`, ni `~/.claude/`, ni ningún otro fichero de configuración del usuario.
+
+Variables de entorno útiles para desarrollo:
+
+* `ALARVITERM_DATA_DIR`: directorio de datos alternativo.
+* `ALARVITERM_TMUX_SOCKET`: nombre de socket alternativo.
+* `ALARVITERM_APP_ID`: identificador de aplicación alternativo, para abrir una segunda instancia aislada.
+* `ALARVITERM_HOOK_BIN`: ruta de `alarviterm-hook` si no está junto a `alarviterm` ni en el PATH.
+* `ALARVITERM_LOG`: nivel de registro (`error`, `warn`, `info`, `debug`).
+
+## Instalar
+
+Hay dos formas. Las dos dejan `alarviterm` y `alarviterm-hook` juntos, que es donde el primero busca al segundo, y añaden la entrada del menú de aplicaciones con su icono.
+
+### En tu carpeta de usuario, sin administrador
+
+```sh
+./scripts/install.sh
+```
+
+Compila en modo release e instala en `~/.local`: los binarios en `~/.local/bin`, la entrada de escritorio en `~/.local/share/applications` y el icono en `~/.local/share/icons`. Con `PREFIX=/otra/ruta` se instala en otro sitio. Si el sistema no tiene `libvte-2.91-gtk4` y existe la copia local de desarrollo, la copia junto a la instalación para que el binario arranque. No toca ninguna configuración.
+
+### Paquete .deb
+
+```sh
+./scripts/package-deb.sh
+sudo apt install ./target/alarviterm_0.1.0_amd64.deb
+```
+
+El paquete declara sus dependencias (GTK 4, libadwaita, VTE para GTK4, SQLite y tmux), así que `apt` las instala. El binario que lleva no contiene rutas de la máquina donde se compiló.
+
+## Desinstalar
+
+Según cómo lo instalaras:
+
+```sh
+./scripts/install.sh --uninstall
+sudo apt remove alarviterm
+```
+
+Ninguna de las dos borra tus datos. Para eliminarlos también:
+
+```sh
+tmux -L alarviterm kill-server
+rm -rf ~/.local/share/alarviterm
+```
+
+## Pruebas
+
+```sh
+cargo test --workspace
+```
+
+Las pruebas de integración lanzan un tmux real en un socket temporal y lo cierran al terminar. Si tmux no está instalado se omiten.
+
+## Consumo medido
+
+Compilación release en un servidor X virtual con renderizado por software, con `scripts/measure.sh 5 10 20`. Todas las sesiones son shells en pestañas de un mismo panel, de modo que solo una está a la vista.
+
+| Sesiones | Memoria de ALarviTerm | Servidor tmux | CPU en reposo | CPU con todas escribiendo |
+| --- | --- | --- | --- | --- |
+| 5 | 148 MB residentes, 60 MB proporcionales | 5 MB | 0,0 % | 0,6 % |
+| 10 | 152 MB residentes, 63 MB proporcionales | 6 MB | 0,0 % | 0,7 % |
+| 20 | 155 MB residentes, 66 MB proporcionales | 7 MB | 0,1 % | 0,8 % |
+
+* La memoria proporcional reparte las bibliotecas de GTK entre los procesos que las comparten. Es la cifra que mejor dice lo que cuesta ALarviTerm. Cada sesión añade menos de medio megabyte.
+* La CPU es el porcentaje de un núcleo. Con todas escribiendo, cada sesión imprime cinco líneas por segundo y el servidor tmux gasta además entre 0,0 y 0,6 %.
+* Binario: 1,4 MB, más 450 kB de `alarviterm-hook`.
+* La ventana aparece en unos 390 ms, medido desde fuera con sondeo, así que el dato real es algo menor.
+* Un terminal que lleva cinco minutos sin verse se desconecta, y con él su cliente tmux, de unos 5 MB. En la medición los clientes bajan de uno por sesión a uno solo. Al volver a su pestaña se conecta de nuevo y la sesión no se entera. La memoria del proceso ALarviTerm no baja al desconectarlos.
+
+Cada evento de Claude Code ejecuta `alarviterm-hook`, que tarda unos 2 ms. La aplicación se entera por inotify, sin sondear.
+
+Los procesos de Claude Code no cuentan aquí: cuelgan del servidor tmux y consumen lo mismo que en cualquier terminal. No hay medición con aceleración gráfica real ni con sesiones de Claude Code trabajando, que es donde un terminal dibuja más.
+
+## Licencia
+
+MIT.

@@ -1,0 +1,15 @@
+[package]
+name = "alarviterm"
+description = "Centro de control nativo para sesiones de Claude Code"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+alarviterm-core = { path = "../core" }
+log = "0.4"
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+vte = { package = "vte4", version = "0.10", features = ["v0_76"] }

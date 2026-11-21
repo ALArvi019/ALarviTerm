@@ -1,0 +1,12 @@
+[package]
+name = "alarviterm-hook"
+description = "Receptor de los hooks de Claude Code para alarviterm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+alarviterm-core = { path = "../core" }
+serde_json = "1"

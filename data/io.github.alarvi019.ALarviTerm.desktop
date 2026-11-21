@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=ALarviTerm
+GenericName=Gestor de sesiones de terminal
+Comment=Centro de control para sesiones de Claude Code y de shell
+Exec=alarviterm
+Icon=io.github.alarvi019.ALarviTerm
+Terminal=false
+Categories=System;TerminalEmulator;GTK;
+Keywords=terminal;claude;tmux;sesiones;
+StartupNotify=true
+StartupWMClass=io.github.alarvi019.ALarviTerm

@@ -1,0 +1,29 @@
+# Compilación
+/target
+/.sysroot
+
+# Paquetes generados
+*.deb
+
+# Datos locales y secretos: nunca al repositorio
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.pem
+*.key
+token
+tokens/
+secrets/
+
+# Editores y herramientas locales
+.idea/
+.vscode/
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+*.swp
+*~
+.DS_Store
