@@ -290,7 +290,7 @@ pub fn new_session(
                             SessionKind::Shell
                         },
                         cwd: cwd.clone(),
-                        model: Some(model.text().to_string()).filter(|_| is_claude),
+                        model: is_claude.then(|| model.text().to_string()),
                         extra_args: if is_claude {
                             extra_args.text().to_string()
                         } else {
