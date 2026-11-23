@@ -124,6 +124,7 @@ button.mt-group-power:hover {
 }
 .mt-arrow {
   color: @mt_dim;
+  font-size: 1.2em;
 }
 .mt-session-name {
   font-weight: 500;
@@ -205,10 +206,37 @@ button.mt-group-power:hover {
 .mt-code-view {
   background-color: @view_bg_color;
 }
+listbox.mt-code-files {
+  background: none;
+}
 listbox.mt-code-files > row {
-  min-height: 24px;
-  padding: 1px 8px;
+  min-height: 21px;
+  padding: 0 6px;
   margin: 0 6px;
+  border-radius: 5px;
+}
+listbox.mt-code-files > row:hover {
+  background-color: @mt_tint;
+}
+listbox.mt-code-files > row:selected {
+  background-color: alpha(@accent_bg_color, 0.35);
+}
+listbox.mt-code-files .mt-arrow {
+  color: @mt_soft;
+}
+.mt-code-new {
+  padding: 0 5px;
+  border-radius: 3px;
+  background-color: alpha(@mt_green, 0.24);
+}
+.mt-code-gone {
+  padding: 0 5px;
+  border-radius: 3px;
+  background-color: alpha(@mt_red, 0.26);
+  text-decoration: line-through;
+}
+.mt-code-ruler {
+  background-color: @mt_tint;
 }
 .mt-code-summary {
   padding: 10px 14px 6px 14px;

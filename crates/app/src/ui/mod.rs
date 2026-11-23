@@ -4,6 +4,7 @@ pub mod dnd;
 pub mod footer;
 pub mod icons;
 pub mod keys;
+pub mod menus;
 pub mod palette;
 pub mod panes;
 pub mod prefs;

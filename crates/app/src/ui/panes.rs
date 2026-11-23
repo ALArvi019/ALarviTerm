@@ -12,6 +12,7 @@ use alarviterm_core::layout::{Node, NodeId, Orientation};
 
 use super::dnd::{self, SessionRef};
 use super::icons::{self, Icon};
+use super::menus;
 use super::status;
 
 const PLACEHOLDER: &str = "placeholder";
@@ -369,33 +370,17 @@ impl PaneView {
 /// Menú contextual de una pestaña.
 fn tab_menu(tab: &gtk::Widget, session: &str) {
     let menu = gio::Menu::new();
-    let item = |label: &str, action: &str, target: &str| {
-        let item = gio::MenuItem::new(Some(label), None);
-        item.set_action_and_target_value(Some(action), Some(&target.to_variant()));
-        item
-    };
-    menu.append_item(&item("Cerrar esta pestaña", "win.tab-close", session));
+    menu.append_item(&menus::item("Cerrar esta pestaña", "win.tab-close", session));
     let many = gio::Menu::new();
     for (label, which) in [
         ("Cerrar las demás", "others"),
         ("Cerrar las de la derecha", "right"),
         ("Cerrar las de la izquierda", "left"),
     ] {
-        many.append_item(&item(label, "win.tab-close-many", &format!("{which}|{session}")));
+        many.append_item(&menus::item(label, "win.tab-close-many", &format!("{which}|{session}")));
     }
     menu.append_section(None, &many);
-
-    let popover = gtk::PopoverMenu::from_model(Some(&menu));
-    popover.set_parent(tab);
-    popover.set_has_arrow(false);
-    popover.set_position(gtk::PositionType::Bottom);
-    // La pestaña se vuelve a crear en cada redibujo: el menú no debe quedarse
-    // colgado de una que ya no existe.
-    popover.connect_closed(|popover| {
-        let popover = popover.clone();
-        glib::idle_add_local_once(move || popover.unparent());
-    });
-    popover.popup();
+    menus::popup(tab, &menu);
 }
 
 fn set_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {

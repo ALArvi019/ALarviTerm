@@ -179,12 +179,14 @@ Las sesiones que no necesitas se pueden apagar sin perderlas: dejan de gastar me
 
 La columna izquierda tiene dos pestañas: Sesiones y Código. La de código reúne, sin configurar nada, los repositorios de git de las carpetas que tienes abiertas, las de tus proyectos y las de tus sesiones, y con ellos sus demás árboles de trabajo. El número de la pestaña es el total de ficheros cambiados.
 
-* Cada repositorio se despliega en el árbol de sus ficheros cambiados, y solo esos. Las carpetas se pliegan con un clic y cada fichero lleva su letra: `M` modificado, `A` añadido, `U` sin seguimiento, `D` borrado, `R` renombrado.
-* Un clic en un fichero lo abre en una comparación que ocupa el sitio de los terminales: a un lado cómo estaba en la última confirmación y al otro cómo está ahora, con resaltado de sintaxis, las líneas quitadas en rojo y las añadidas en verde. Las dos mitades se desplazan a la par, y `Alt+Abajo` y `Alt+Arriba` saltan de un cambio a otro.
+* Cada repositorio se despliega en el árbol de sus ficheros cambiados, y solo esos. Las carpetas se pliegan con un clic. El botón de la flecha, arriba, pliega todo o despliega de una vez todos los repositorios con cambios. Cada fichero lleva el icono de su tipo, el que tenga el tema de iconos del escritorio, y su letra: `M` modificado, `A` añadido, `U` sin seguimiento, `D` borrado, `R` renombrado. Los nuevos van sobre verde y los que se borran sobre rojo.
+* Un clic en un fichero lo abre en una comparación que ocupa el sitio de los terminales: a un lado cómo estaba en la última confirmación y al otro cómo está ahora, con resaltado de sintaxis, las líneas quitadas en rojo y las añadidas en verde. Las dos mitades se desplazan a la par, se mueva la que se mueva, y `Alt+Abajo` y `Alt+Arriba` saltan de un cambio a otro. En el margen derecho, una barra fina marca dónde hay cambios a lo largo del fichero: verde lo añadido, rojo lo quitado y azul lo modificado. Un clic en una marca lleva a ese cambio.
 * La mitad de la derecha es un editor: se retoca el fichero y `Ctrl+S` lo guarda. La comparación se rehace mientras escribes. Si cambias de fichero o cierras con cambios sin guardar, pregunta antes.
 * `Escape`, el botón de cerrar o volver a la pestaña Sesiones devuelven los terminales tal y como estaban. Las sesiones siguen trabajando mientras tanto.
 
 `Ctrl+Mayús+K`, la entrada "Control de código fuente" del menú de una sesión, o un clic en la rama del pie llevan a la pestaña con el repositorio de esa sesión desplegado y su primer cambio abierto. Los cambios se releen al entrar en la pestaña, cada pocos segundos mientras está a la vista, al guardar y con su botón de refrescar.
+
+El clic derecho sobre un árbol de trabajo añadido con `git worktree` ofrece eliminarlo. Pide confirmación dos veces: la primera dice qué carpeta es, cuántos cambios sin confirmar tiene y qué sesiones trabajan en ella, y la segunda lo que se pierde. Borra la carpeta y conserva la rama. El árbol principal de un repositorio no se puede eliminar desde aquí.
 
 No confirma, no prepara ni descarta cambios: para eso sigue estando git o la propia sesión. Los ficheros binarios y los de más de 2 MB no se abren.
 

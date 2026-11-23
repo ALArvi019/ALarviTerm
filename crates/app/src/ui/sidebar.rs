@@ -535,7 +535,8 @@ fn group_row(
     power: Option<(i64, usize)>,
 ) -> (gtk::ListBoxRow, GroupSummary) {
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let arrow = gtk::Label::new(Some(if collapsed { "▸" } else { "▾" }));
+    let arrow = gtk::Image::from_icon_name(if collapsed { "pan-end-symbolic" } else { "pan-down-symbolic" });
+    arrow.set_pixel_size(16);
     arrow.add_css_class("mt-arrow");
     let label = gtk::Label::new(Some(&name.to_uppercase()));
     label.add_css_class("mt-group-name");

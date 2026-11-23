@@ -6,6 +6,8 @@ Todos los cambios relevantes de ALarviTerm se anotan aquí. El formato sigue [Ke
 
 ### Añadido
 
+* Botón en la pestaña de código para plegar todo o desplegar de una vez todos los repositorios con cambios.
+* Eliminar un árbol de trabajo de git desde la pestaña de código, con doble confirmación.
 * Límites de uso de la cuenta en el pie: lo usado de las ventanas de 5 horas y de 7 días y el tiempo hasta su reinicio.
 * Medidores en el pie con barras finas: CPU, memoria y red del equipo, con un panel ampliado al pasar el ratón que incluye la sesión activa y la propia aplicación.
 * Panel de estadísticas de uso de Claude Code, a partir de sus transcripciones locales.
@@ -29,10 +31,13 @@ Todos los cambios relevantes de ALarviTerm se anotan aquí. El formato sigue [Ke
 
 ### Cambiado
 
+* En la comparación de código las dos mitades se desplazan a la par en los dos sentidos, y una barra de marcas señala y lleva a cada bloque de cambios.
+* El árbol de código lleva iconos por tipo de fichero, fondo verde o rojo para lo nuevo y lo borrado, filas más juntas y flechas más grandes.
 * Las recargas por eventos de las sesiones se espacian y git y el consumo de la sesión se consultan como mucho cada cuatro segundos. Con cinco sesiones emitiendo cien eventos por segundo la aplicación pasa del 10 % al 2,6 % de un núcleo.
 
 ### Corregido
 
+* Un menú contextual abierto sobre una fila o una pestaña que se redibujaba podía cerrar la aplicación.
 * Los colores de Claude Code se veían reducidos a 256 dentro de la aplicación. Ahora las sesiones reciben color de 24 bits.
 * Cierre inesperado al retirar un terminal mientras su proceso terminaba.
 * El instalador ya no sobrescribe en el sitio la biblioteca de terminal de una instancia abierta.

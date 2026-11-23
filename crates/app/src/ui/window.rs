@@ -1012,6 +1012,91 @@ impl MainWindow {
         });
     }
 
+    /// Elimina un árbol de trabajo añadido, tras confirmarlo dos veces: la
+    /// primera cuenta qué es y qué arrastra, la segunda lo que se pierde.
+    fn remove_worktree(&self, root: std::path::PathBuf) {
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let place = display_path(&root);
+        let changes = self.0.codebar.changes_in(&root);
+        let (branch, pending) = changes.unwrap_or_default();
+        let sessions: Vec<String> = self
+            .0
+            .snapshot
+            .borrow()
+            .sessions
+            .iter()
+            .filter(|v| v.session.cwd.starts_with(&root))
+            .map(|v| v.session.name.clone())
+            .collect();
+
+        let mut first = format!("Carpeta {place}\nRama {branch}\n\n");
+        first.push_str(&match pending {
+            0 => "No tiene cambios sin confirmar.".to_string(),
+            1 => "Tiene 1 fichero con cambios sin confirmar.".to_string(),
+            n => format!("Tiene {n} ficheros con cambios sin confirmar."),
+        });
+        if !sessions.is_empty() {
+            first.push_str(&format!(
+                "\n\nHay sesiones trabajando en esta carpeta, que se quedarán sin ella: {}.",
+                sessions.join(", ")
+            ));
+        }
+        let mut second = format!("Se borrará del disco la carpeta {place}, con todo lo que contiene.");
+        if pending > 0 {
+            second.push_str(" Los cambios sin confirmar se perderán.");
+        }
+        second.push_str(&format!(" La rama {branch} se conserva en el repositorio. No se puede deshacer."));
+
+        let weak = self.weak();
+        let heading = format!("Eliminar el worktree «{name}»");
+        let confirm_again = {
+            let (root, heading) = (root.clone(), heading.clone());
+            move || {
+                let Some(inner) = weak.upgrade() else { return };
+                let this = MainWindow(inner);
+                let run = {
+                    let root = root.clone();
+                    this.handler(move |this, ()| this.remove_worktree_now(root.clone(), pending > 0))
+                };
+                let dialog = dialogs::confirm(
+                    &this.0.window,
+                    &heading,
+                    &second,
+                    "Eliminar definitivamente",
+                    true,
+                    move || run(()),
+                );
+                this.refocus_after(&dialog);
+            }
+        };
+        let dialog = dialogs::confirm(&self.0.window, &heading, &first, "Continuar", true, confirm_again);
+        self.refocus_after(&dialog);
+    }
+
+    fn remove_worktree_now(&self, root: std::path::PathBuf, force: bool) {
+        let inner = &self.0;
+        // Si lo que se está comparando es de esa carpeta, se cierra antes.
+        if inner.code_view.current().is_some_and(|(open, _)| open == root) {
+            inner.center.set_visible_child_name(CENTER_TERMINALS);
+            inner.codebar.select(None);
+        }
+        let weak = self.weak();
+        glib::spawn_future_local(async move {
+            let target = root.clone();
+            let result = gio::spawn_blocking(move || alarviterm_core::scm::remove_worktree(&target, force)).await;
+            let Some(inner) = weak.upgrade() else { return };
+            let this = MainWindow(inner);
+            match result {
+                Ok(Ok(())) => {
+                    this.0.toasts.add_toast(adw::Toast::new(&format!("Worktree {} eliminado", display_path(&root))));
+                }
+                Ok(Err(error)) => this.toast(&format!("No se pudo eliminar el worktree: {error}")),
+                Err(_) => this.toast("No se pudo eliminar el worktree"),
+            }
+            this.refresh_code();
+        });
+    }
+
     /// Relee solo los repositorios desplegados. Es lo que se hace cada pocos
     /// segundos: leerlos todos, con decenas de árboles de trabajo, es caro.
     fn refresh_open_code(&self) {
@@ -1984,6 +2069,9 @@ impl MainWindow {
             }
         });
         self.add_target_action("session-scm", |this, id| this.show_scm(id));
+        self.add_target_action("code-worktree-remove", |this, root| {
+            this.remove_worktree(std::path::PathBuf::from(root));
+        });
         self.add_action("projects", |this| this.show_projects());
         self.add_action("current-archive", |this| match this.selected() {
             Some(id) => this.set_archived(&id, true),

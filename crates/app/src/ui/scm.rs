@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use alarviterm_core::scm::{self, Change, LineDiff, LineKind, Status};
+use alarviterm_core::scm::{self, BlockKind, Change, LineDiff, LineKind, Status};
 use gtk::{gdk, glib};
 use sourceview::prelude::*;
 
@@ -125,7 +125,12 @@ pub struct CodeView {
     new_view: sourceview::View,
     new_buffer: sourceview::Buffer,
     new_scroller: gtk::ScrolledWindow,
-    diff: RefCell<LineDiff>,
+    diff: Rc<RefCell<LineDiff>>,
+    /// Barra de marcas: dónde hay cambios a lo largo del fichero.
+    ruler: gtk::DrawingArea,
+    /// Una mitad se está moviendo para seguir a la otra: su propio aviso de
+    /// desplazamiento no debe devolver el movimiento.
+    following: Cell<bool>,
     rediff_pending: Cell<bool>,
     /// Evita que cargar un fichero dispare los avisos de edición.
     loading: Cell<bool>,
@@ -144,9 +149,42 @@ impl CodeView {
         let old_side = gtk::Box::new(gtk::Orientation::Vertical, 0);
         old_side.append(&caption("ÚLTIMA CONFIRMACIÓN"));
         old_side.append(&old_scroller);
+        // Junto a la mitad editable, una barra fina con una marca por bloque
+        // de cambios: verde lo añadido, rojo lo quitado, azul lo modificado.
+        let diff = Rc::new(RefCell::new(LineDiff::default()));
+        let ruler = gtk::DrawingArea::new();
+        ruler.add_css_class("mt-code-ruler");
+        ruler.set_content_width(12);
+        ruler.set_vexpand(true);
+        ruler.set_tooltip_text(Some("Cambios a lo largo del fichero. Pulsa una marca para ir a ella"));
+        {
+            let (diff, scroller) = (diff.clone(), new_scroller.clone());
+            ruler.set_draw_func(move |_, cr, width, height| {
+                let diff = diff.borrow();
+                let (width, height) = (f64::from(width), f64::from(height));
+                let lines = diff.new.len().max(1) as f64;
+                // La parte del fichero que se está viendo.
+                let adjustment = scroller.vadjustment();
+                let span = adjustment.upper().max(1.0);
+                cr.set_source_rgba(0.5, 0.5, 0.5, 0.16);
+                cr.rectangle(0.0, adjustment.value() / span * height, width, (adjustment.page_size() / span * height).max(4.0));
+                let _ = cr.fill();
+                for block in &diff.blocks {
+                    let (r, g, b) = block_color(block.kind);
+                    let top = block.new_start as f64 / lines * height;
+                    let tall = (block.new_len as f64 / lines * height).max(3.0);
+                    cr.set_source_rgba(r, g, b, 0.95);
+                    cr.rectangle(2.0, top.min(height - tall), width - 4.0, tall);
+                    let _ = cr.fill();
+                }
+            });
+        }
+        let new_body = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        new_body.append(&new_scroller);
+        new_body.append(&ruler);
         let new_side = gtk::Box::new(gtk::Orientation::Vertical, 0);
         new_side.append(&caption("ÁRBOL DE TRABAJO, EDITABLE"));
-        new_side.append(&new_scroller);
+        new_side.append(&new_body);
         let compare = gtk::Paned::new(gtk::Orientation::Horizontal);
         compare.set_start_child(Some(&old_side));
         compare.set_end_child(Some(&new_side));
@@ -210,7 +248,9 @@ impl CodeView {
             new_view,
             new_buffer,
             new_scroller,
-            diff: RefCell::new(LineDiff::default()),
+            diff,
+            ruler,
+            following: Cell::new(false),
             rediff_pending: Cell::new(false),
             loading: Cell::new(false),
         });
@@ -263,13 +303,46 @@ impl CodeView {
             });
         });
 
-        // La mitad antigua sigue a la nueva al desplazarse.
+        // Las dos mitades se desplazan a la par, se mueva la que se mueva.
         let weak = Rc::downgrade(self);
         self.new_scroller.vadjustment().connect_value_changed(move |_| {
             if let Some(view) = weak.upgrade() {
-                view.follow_scroll();
+                view.ruler.queue_draw();
+                view.follow_scroll(true);
             }
         });
+        let weak = Rc::downgrade(self);
+        self.old_scroller.vadjustment().connect_value_changed(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.follow_scroll(false);
+            }
+        });
+
+        // Un clic en la barra de marcas lleva al bloque de cambios más cercano.
+        let click = gtk::GestureClick::new();
+        let weak = Rc::downgrade(self);
+        click.connect_pressed(move |gesture, _, _, y| {
+            let Some(view) = weak.upgrade() else { return };
+            let height = gesture.widget().map_or(1, |w| w.height()).max(1);
+            let diff = view.diff.borrow();
+            let line = y / f64::from(height) * diff.new.len().max(1) as f64;
+            let nearest = diff
+                .blocks
+                .iter()
+                .min_by(|a, b| {
+                    let distance = |block: &scm::Block| {
+                        let (start, end) = (block.new_start as f64, (block.new_start + block.new_len) as f64);
+                        if line < start { start - line } else if line > end { line - end } else { 0.0 }
+                    };
+                    distance(a).total_cmp(&distance(b))
+                })
+                .map(|block| block.new_start);
+            drop(diff);
+            if let Some(line) = nearest {
+                view.go_to_line(line);
+            }
+        });
+        self.ruler.add_controller(click);
 
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -474,33 +547,46 @@ impl CodeView {
             (added, removed) => format!("+{added}  −{removed}"),
         });
         *self.diff.borrow_mut() = diff;
-        self.follow_scroll();
+        self.ruler.queue_draw();
+        self.follow_scroll(true);
     }
 
-    /// Coloca la mitad antigua a la altura de lo que enseña la nueva.
-    fn follow_scroll(&self) {
-        let offset = self.new_scroller.vadjustment().value();
-        let Some(top) = self.new_view.iter_at_location(0, offset as i32) else {
+    /// Coloca una mitad a la altura de lo que enseña la otra. Con
+    /// `from_new` manda la nueva y se mueve la antigua, y al revés.
+    fn follow_scroll(&self, from_new: bool) {
+        if self.following.get() {
             return;
+        }
+        let (lead_view, lead_scroller, tail_view, tail_buffer, tail_scroller) = if from_new {
+            (&self.new_view, &self.new_scroller, &self.old_view, &self.old_buffer, &self.old_scroller)
+        } else {
+            (&self.old_view, &self.old_scroller, &self.new_view, &self.new_buffer, &self.new_scroller)
         };
-        // Cuánto de la primera línea visible queda ya por encima.
-        let (line_y, _) = self.new_view.line_yrange(&top);
+        let offset = lead_scroller.vadjustment().value();
+        // La primera línea visible y cuánto de ella queda ya por encima.
+        let (top, line_y) = lead_view.line_at_y(offset as i32);
         let inside = offset - f64::from(line_y);
-        let old_line = self.diff.borrow().old_line_for(top.line().max(0) as usize);
-        let target = self
-            .old_buffer
-            .iter_at_line(old_line as i32)
-            .unwrap_or_else(|| self.old_buffer.end_iter());
-        let (old_y, _) = self.old_view.line_yrange(&target);
-        let adjustment = self.old_scroller.vadjustment();
+        let line = top.line().max(0) as usize;
+        let other = {
+            let diff = self.diff.borrow();
+            if from_new { diff.old_line_for(line) } else { diff.new_line_for(line) }
+        };
+        let target = tail_buffer.iter_at_line(other as i32).unwrap_or_else(|| tail_buffer.end_iter());
+        let (tail_y, _) = tail_view.line_yrange(&target);
+        let adjustment = tail_scroller.vadjustment();
         let limit = (adjustment.upper() - adjustment.page_size()).max(0.0);
-        adjustment.set_value((f64::from(old_y) + inside).clamp(0.0, limit));
+        let wanted = (f64::from(tail_y) + inside).clamp(0.0, limit);
+        if (adjustment.value() - wanted).abs() < 0.5 {
+            return;
+        }
+        self.following.set(true);
+        adjustment.set_value(wanted);
+        self.following.set(false);
     }
 
     fn go_to_line(&self, line: usize) {
-        let Some(mut iter) = self.new_buffer.iter_at_line(line as i32) else {
-            return;
-        };
+        // Un bloque quitado al final cae tras la última línea.
+        let mut iter = self.new_buffer.iter_at_line(line as i32).unwrap_or_else(|| self.new_buffer.end_iter());
         self.new_buffer.place_cursor(&iter);
         self.new_view.scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.2);
     }
@@ -547,5 +633,14 @@ impl CodeView {
                 false
             }
         }
+    }
+}
+
+/// Color de la marca de un bloque de cambios.
+fn block_color(kind: BlockKind) -> (f64, f64, f64) {
+    match kind {
+        BlockKind::Added => (0.25, 0.73, 0.31),
+        BlockKind::Removed => (0.94, 0.33, 0.30),
+        BlockKind::Modified => (0.30, 0.55, 1.0),
     }
 }

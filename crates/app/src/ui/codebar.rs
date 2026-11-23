@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk::prelude::*;
+use gtk::{gdk, gio};
 use alarviterm_core::paths::display_path;
 use alarviterm_core::scm::{self, Change, Repo, Status, TreeNode};
 
@@ -24,6 +25,8 @@ pub struct CodeBar {
     list: gtk::ListBox,
     summary: gtk::Label,
     spinner: gtk::Spinner,
+    /// Botón que pliega o despliega todo de una vez.
+    fold: gtk::Button,
     repos: RefCell<Vec<Repo>>,
     /// Repositorios desplegados, por su raíz.
     expanded: RefCell<HashSet<PathBuf>>,
@@ -50,11 +53,13 @@ impl CodeBar {
         header.set_margin_start(14);
         header.set_margin_end(6);
         header.append(&summary);
+        let fold = gtk::Button::from_icon_name("view-list-symbolic");
+        fold.add_css_class("flat");
         header.append(&spinner);
+        header.append(&fold);
         header.append(&refresh);
 
         let list = gtk::ListBox::new();
-        list.add_css_class("navigation-sidebar");
         list.add_css_class("mt-code-files");
         list.set_selection_mode(gtk::SelectionMode::Single);
         let scroller = gtk::ScrolledWindow::new();
@@ -73,6 +78,7 @@ impl CodeBar {
             list,
             summary,
             spinner,
+            fold,
             repos: RefCell::new(Vec::new()),
             expanded: RefCell::new(HashSet::new()),
             collapsed: RefCell::new(HashSet::new()),
@@ -85,6 +91,40 @@ impl CodeBar {
                 (bar.callbacks.refresh)();
             }
         });
+        let weak = Rc::downgrade(&bar);
+        bar.fold.connect_clicked(move |_| {
+            if let Some(bar) = weak.upgrade() {
+                bar.toggle_all();
+            }
+        });
+        // Clic derecho sobre la cabecera de un repositorio.
+        let secondary = gtk::GestureClick::new();
+        secondary.set_button(gdk::BUTTON_SECONDARY);
+        let weak = Rc::downgrade(&bar);
+        secondary.connect_pressed(move |_, _, _, y| {
+            let Some(bar) = weak.upgrade() else { return };
+            let Some(row) = bar.list.row_at_y(y as i32) else { return };
+            let name = row.widget_name();
+            let Some(index) = name.strip_prefix("r:").and_then(|i| i.parse::<usize>().ok()) else {
+                return;
+            };
+            let root = bar.repos.borrow().get(index).map(|r| r.root.clone());
+            let Some(root) = root else { return };
+            let menu = gio::Menu::new();
+            if scm::is_main_worktree(&root) {
+                // Sin acción, la entrada sale apagada: explica por qué no hay nada que hacer.
+                menu.append(Some("Árbol principal del repositorio, no se elimina"), None);
+            } else {
+                menu.append_item(&super::menus::item(
+                    "Eliminar este worktree…",
+                    "win.code-worktree-remove",
+                    &root.to_string_lossy(),
+                ));
+            }
+            super::menus::popup(&row, &menu);
+        });
+        bar.list.add_controller(secondary);
+
         let weak = Rc::downgrade(&bar);
         bar.list.connect_row_activated(move |_, row| {
             if let Some(bar) = weak.upgrade() {
@@ -130,6 +170,34 @@ impl CodeBar {
             }
             _ => {}
         }
+    }
+
+    /// Hay algún repositorio desplegado.
+    fn any_expanded(&self) -> bool {
+        let expanded = self.expanded.borrow();
+        self.repos.borrow().iter().any(|r| expanded.contains(&r.root))
+    }
+
+    /// Pliega todo si hay algo desplegado. Si no, despliega los repositorios con cambios
+    /// y todas sus carpetas.
+    fn toggle_all(&self) {
+        if self.any_expanded() {
+            self.expanded.borrow_mut().clear();
+        } else {
+            let roots: HashSet<PathBuf> =
+                self.repos.borrow().iter().filter(|r| !r.changes.is_empty()).map(|r| r.root.clone()).collect();
+            *self.expanded.borrow_mut() = roots;
+            self.collapsed.borrow_mut().clear();
+        }
+        self.fill();
+    }
+
+    /// Ajusta el botón de plegar a lo que haría al pulsarlo.
+    fn update_fold(&self) {
+        let open = self.any_expanded();
+        self.fold.set_icon_name(if open { "go-up-symbolic" } else { "go-down-symbolic" });
+        self.fold.set_tooltip_text(Some(if open { "Plegar todo" } else { "Desplegar todos los cambios" }));
+        self.fold.set_sensitive(open || self.repos.borrow().iter().any(|r| !r.changes.is_empty()));
     }
 
     pub fn set_loading(&self, loading: bool) {
@@ -203,6 +271,15 @@ impl CodeBar {
             .and_then(|repo| repo.changes.iter().find(|c| c.path == path).cloned())
     }
 
+    /// Rama de un repositorio y cuántos ficheros tiene con cambios.
+    pub fn changes_in(&self, root: &Path) -> Option<(String, usize)> {
+        self.repos
+            .borrow()
+            .iter()
+            .find(|repo| repo.root == root)
+            .map(|repo| (repo.branch.clone(), repo.changes.len()))
+    }
+
     pub fn first_change(&self, root: &Path) -> Option<Change> {
         self.repos.borrow().iter().find(|repo| repo.root == root).and_then(|repo| repo.changes.first().cloned())
     }
@@ -213,6 +290,7 @@ impl CodeBar {
     }
 
     fn fill(&self) {
+        self.update_fold();
         self.list.remove_all();
         let repos = self.repos.borrow();
         let total: usize = repos.iter().map(|repo| repo.changes.len()).sum();
@@ -229,7 +307,7 @@ impl CodeBar {
         let mut chosen = None;
         for (index, repo) in repos.iter().enumerate() {
             let open = expanded.contains(&repo.root);
-            let arrow = gtk::Label::new(Some(if open { "▾" } else { "▸" }));
+            let arrow = arrow_icon(open);
             arrow.add_css_class("mt-arrow");
             let name = gtk::Label::new(Some(
                 &repo.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -299,7 +377,7 @@ impl CodeBar {
                 TreeNode::Folder { name, children } => {
                     let path = format!("{parent}{name}");
                     let folded = collapsed.contains(&format!("{prefix}{path}"));
-                    let arrow = gtk::Label::new(Some(if folded { "▸" } else { "▾" }));
+                    let arrow = arrow_icon(!folded);
                     arrow.add_css_class("mt-arrow");
                     let label = gtk::Label::new(Some(name));
                     label.add_css_class("mt-code-folder");
@@ -319,17 +397,23 @@ impl CodeBar {
                 TreeNode::File { name, change } => {
                     let label = gtk::Label::new(Some(name));
                     label.set_xalign(0.0);
-                    label.set_hexpand(true);
                     label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-                    if change.status == Status::Deleted {
-                        label.add_css_class("mt-code-deleted");
+                    // Lo nuevo va sobre verde y lo que se borra sobre rojo.
+                    match change.status {
+                        Status::Deleted => label.add_css_class("mt-code-gone"),
+                        Status::Added | Status::Untracked => label.add_css_class("mt-code-new"),
+                        _ => {}
                     }
+                    let holder = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                    holder.set_hexpand(true);
+                    holder.append(&label);
                     let letter = gtk::Label::new(Some(change.status.letter()));
                     letter.add_css_class("mt-code-status");
                     letter.add_css_class(status_class(change.status));
                     // Hueco de la flecha de las carpetas, para que los nombres casen.
-                    content.set_margin_start(depth * 12 + 14);
-                    content.append(&label);
+                    content.set_margin_start(depth * 12 + 16);
+                    content.append(&file_icon(name));
+                    content.append(&holder);
                     content.append(&letter);
                     row.set_widget_name(&format!("f:{repo}:{}", change.path));
                     let staged = if change.staged { ", preparado para confirmar" } else { "" };
@@ -352,4 +436,20 @@ fn status_class(status: Status) -> &'static str {
         Status::Deleted => "s-deleted",
         Status::Conflicted => "s-conflict",
     }
+}
+
+/// Icono del tipo de fichero, el que el tema de iconos del escritorio tenga
+/// para su extensión.
+fn file_icon(name: &str) -> gtk::Image {
+    let (kind, _) = gio::content_type_guess(Some(name), None::<&[u8]>);
+    let image = gtk::Image::from_gicon(&gio::content_type_get_icon(&kind));
+    image.set_pixel_size(14);
+    image
+}
+
+/// Flecha de plegar y desplegar.
+fn arrow_icon(open: bool) -> gtk::Image {
+    let image = gtk::Image::from_icon_name(if open { "pan-down-symbolic" } else { "pan-end-symbolic" });
+    image.set_pixel_size(16);
+    image
 }
