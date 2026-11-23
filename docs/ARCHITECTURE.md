@@ -181,7 +181,7 @@ Flatpak no encaja bien. ALarviTerm existe para lanzar el `claude`, el shell y el
 
 Claude Code entrega a su línea de estado, en cada actualización, el porcentaje consumido de las ventanas de 5 horas y de 7 días y la hora de reinicio. Es la única vía documentada para obtenerlos sin leer credenciales ni llamar a ningún servicio, así que se usa esa.
 
-El fichero de ajustes que se pasa a cada sesión con `--settings` registra `alarviterm-hook statusline` como línea de estado. Ese modo del hook hace dos cosas. Guarda los límites en `state/.limits`, solo si cambian, para no despertar a la aplicación en cada refresco. Después ejecuta la línea de estado de `~/.claude/settings.json` con la misma entrada y deja que escriba en la salida, de modo que el usuario ve la suya. La aplicación vigila el fichero y actualiza el pie sin recargar nada más.
+El fichero de ajustes que se pasa a cada sesión con `--settings` registra `alarviterm-hook statusline` como línea de estado. Ese modo del hook hace dos cosas. Guarda los límites en `state/.limits`, o en `state/.limits-<cuenta>` si el proyecto de la sesión tiene una cuenta con nombre (le llega en `ALARVITERM_ACCOUNT`), solo si cambian, para no despertar a la aplicación en cada refresco. Después ejecuta la línea de estado de `~/.claude/settings.json` con la misma entrada y deja que escriba en la salida, de modo que el usuario ve la suya. La aplicación vigila el fichero y actualiza el pie sin recargar nada más.
 
 No se encadena la línea de estado de los ajustes de un proyecto. Claude Code solo la ejecuta cuando el usuario ha confiado en la carpeta, y el hook no puede saberlo.
 

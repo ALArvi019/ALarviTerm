@@ -13,6 +13,92 @@ use serde_json::{json, Value};
 /// Fichero del directorio de estado con los últimos límites conocidos.
 pub const LIMITS_MARK: &str = ".limits";
 
+/// Variable con la que cada sesión sabe a qué cuenta pertenece. Vacía o
+/// ausente: la cuenta predeterminada.
+pub const ACCOUNT_ENV: &str = "ALARVITERM_ACCOUNT";
+
+/// Nombre del fichero de límites de una cuenta. Cada cuenta tiene el suyo
+/// para que los porcentajes de una no pisen los de otra.
+pub fn mark(account: &str) -> String {
+    let slug: String = account
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    if slug.is_empty() {
+        LIMITS_MARK.to_string()
+    } else {
+        format!("{LIMITS_MARK}-{slug}")
+    }
+}
+
+/// Prefijo del fichero con el contexto que lleva usado una sesión.
+pub const CONTEXT_MARK: &str = ".context-";
+
+/// Argumento que hace callar a la línea de estado: se recogen los datos pero
+/// no se ejecuta la del usuario, así que bajo el cuadro de texto no sale nada.
+pub const QUIET_ARG: &str = "--quiet";
+
+/// Cuánto de su ventana de contexto lleva usado una sesión de Claude Code,
+/// según lo que el propio Claude Code le pasa a la línea de estado.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SessionContext {
+    /// Porcentaje usado, de 0 a 100.
+    pub used_percent: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl SessionContext {
+    pub fn from_statusline(input: &Value) -> Option<Self> {
+        let window = input.get("context_window")?;
+        let used_percent = window.get("used_percentage")?.as_f64().filter(|p| p.is_finite())?;
+        let tokens = |key: &str| window.get(key).and_then(Value::as_u64).unwrap_or(0);
+        Some(Self {
+            used_percent: used_percent.clamp(0.0, 100.0),
+            input_tokens: tokens("total_input_tokens"),
+            output_tokens: tokens("total_output_tokens"),
+        })
+    }
+
+    pub fn from_json(text: &str) -> Option<Self> {
+        let value: Value = serde_json::from_str(text).ok()?;
+        Some(Self {
+            used_percent: value.get("used")?.as_f64()?,
+            input_tokens: value.get("input")?.as_u64()?,
+            output_tokens: value.get("output")?.as_u64()?,
+        })
+    }
+
+    pub fn to_json(&self) -> String {
+        json!({ "used": self.used_percent, "input": self.input_tokens, "output": self.output_tokens }).to_string()
+    }
+
+    pub fn remaining_percent(&self) -> u32 {
+        100 - self.used_percent.round().clamp(0.0, 100.0) as u32
+    }
+}
+
+fn context_file(state_dir: &Path, session: &str) -> Option<PathBuf> {
+    let safe = !session.is_empty() && session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    safe.then(|| state_dir.join(format!("{CONTEXT_MARK}{session}")))
+}
+
+/// Contexto guardado de una sesión de ALarviTerm.
+pub fn read_context(state_dir: &Path, session: &str) -> Option<SessionContext> {
+    SessionContext::from_json(&std::fs::read_to_string(context_file(state_dir, session)?).ok()?)
+}
+
+pub fn write_context(state_dir: &Path, session: &str, context: &SessionContext) -> std::io::Result<()> {
+    let Some(target) = context_file(state_dir, session) else {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "identificador de sesión no válido"));
+    };
+    let temporary = state_dir.join(format!("{CONTEXT_MARK}{session}.{}.tmp", std::process::id()));
+    std::fs::write(&temporary, context.to_json())?;
+    std::fs::rename(&temporary, &target)
+}
+
 /// Argumento con el que Claude Code llama al hook como línea de estado.
 pub const STATUSLINE_ARG: &str = "statusline";
 
@@ -39,9 +125,10 @@ impl Window {
         json!({ "used_percentage": self.used_percent, "resets_at": self.resets_at })
     }
 
-    /// Porcentaje que queda por gastar, redondeado.
+    /// Porcentaje que queda por gastar. Se redondea lo usado y se resta, para
+    /// que sume cien con el porcentaje usado que enseña Claude Code.
     pub fn remaining_percent(&self) -> u32 {
-        (100.0 - self.used_percent).round().clamp(0.0, 100.0) as u32
+        100 - self.used_percent.round().clamp(0.0, 100.0) as u32
     }
 
     /// Segundos que faltan para el reinicio.
@@ -122,14 +209,14 @@ impl RateLimits {
     }
 }
 
-/// Lee los límites guardados en el directorio de estado.
-pub fn read(state_dir: &Path) -> Option<RateLimits> {
-    RateLimits::from_json(&std::fs::read_to_string(state_dir.join(LIMITS_MARK)).ok()?)
+/// Lee los límites guardados de una cuenta en el directorio de estado.
+pub fn read(state_dir: &Path, account: &str) -> Option<RateLimits> {
+    RateLimits::from_json(&std::fs::read_to_string(state_dir.join(mark(account))).ok()?)
 }
 
-/// Guarda los límites con escritura atómica.
-pub fn write(state_dir: &Path, limits: &RateLimits) -> std::io::Result<()> {
-    let target = state_dir.join(LIMITS_MARK);
+/// Guarda los límites de una cuenta con escritura atómica.
+pub fn write(state_dir: &Path, account: &str, limits: &RateLimits) -> std::io::Result<()> {
+    let target = state_dir.join(mark(account));
     let temporary = state_dir.join(format!("{LIMITS_MARK}.{}.tmp", std::process::id()));
     std::fs::write(&temporary, limits.to_json())?;
     std::fs::rename(&temporary, &target)
@@ -206,6 +293,8 @@ mod tests {
         let limits = RateLimits::from_statusline(&sample(), 900_000).expect("límites");
         let five = limits.five_hour.expect("5h");
         assert_eq!(five.remaining_percent(), 63);
+        // Con 73,5 % usado Claude Code enseña 74: aquí deben quedar 26, no 27.
+        assert_eq!(Window { used_percent: 73.5, resets_at: 1 }.remaining_percent(), 26);
         assert_eq!(five.seconds_left(900_000), 100_000);
         assert_eq!(limits.seven_day.expect("7d").remaining_percent(), 88);
         assert_eq!(limits.updated, 900_000);
@@ -248,6 +337,43 @@ mod tests {
         assert_eq!(merged.seven_day, full.seven_day);
         assert!(only_five.merged_with(Some(full), 1_500_000).seven_day.is_none());
         assert!(full.same_data(&RateLimits { updated: 1, ..full }));
+    }
+
+    #[test]
+    fn each_account_keeps_its_own_limits() {
+        assert_eq!(mark(""), ".limits");
+        assert_eq!(mark("  "), ".limits");
+        assert_eq!(mark("Mi Empresa/2"), ".limits-mi_empresa_2");
+        let dir = std::env::temp_dir().join(format!("alarviterm-accounts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("carpeta");
+        let personal = RateLimits::from_statusline(&sample(), 900_000).expect("límites");
+        let work = RateLimits { updated: 5, seven_day: None, ..personal };
+        write(&dir, "", &personal).expect("guarda");
+        write(&dir, "Trabajo", &work).expect("guarda");
+        assert_eq!(read(&dir, ""), Some(personal));
+        assert_eq!(read(&dir, "trabajo"), Some(work));
+        assert_eq!(read(&dir, "otra"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_context_is_read_and_kept_per_session() {
+        let input = json!({ "context_window": {
+            "used_percentage": 12.4, "total_input_tokens": 116_900, "total_output_tokens": 416
+        }});
+        let context = SessionContext::from_statusline(&input).expect("contexto");
+        assert_eq!(context.remaining_percent(), 88);
+        assert_eq!((context.input_tokens, context.output_tokens), (116_900, 416));
+        assert!(SessionContext::from_statusline(&json!({ "context_window": {} })).is_none());
+        assert!(SessionContext::from_statusline(&sample()).is_none());
+
+        let dir = std::env::temp_dir().join(format!("alarviterm-context-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("carpeta");
+        write_context(&dir, "abc123", &context).expect("guarda");
+        assert_eq!(read_context(&dir, "abc123"), Some(context));
+        assert_eq!(read_context(&dir, "otra"), None);
+        assert!(write_context(&dir, "../fuera", &context).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

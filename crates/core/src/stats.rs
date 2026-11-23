@@ -513,6 +513,11 @@ pub fn utc_local(ts: i64) -> (i64, usize, usize) {
     ((day), ((day + 3).rem_euclid(7)) as usize, (ts.rem_euclid(86_400) / 3600) as usize)
 }
 
+/// Si la carpeta de trabajo `cwd` es `root` o está dentro de ella.
+pub fn is_under(cwd: &str, root: &Path) -> bool {
+    Path::new(cwd).starts_with(root)
+}
+
 /// Segundos con actividad: la suma de los huecos cortos entre eventos
 /// seguidos de una misma sesión. Es una estimación, no una medida.
 fn active_seconds(stamps: &mut [(u64, i64)], mut add: impl FnMut(i64, u64)) {
@@ -529,6 +534,19 @@ impl Library {
     /// Resume el periodo `[start, end)`. Con `start` en `None` cubre todo el
     /// historial, desde el primer día con datos.
     pub fn summarize(&self, start: Option<i64>, end: i64, local: LocalTime) -> Summary {
+        self.summarize_where(start, end, local, &|_| true)
+    }
+
+    /// Como [`Library::summarize`], contando solo el trabajo hecho en las
+    /// carpetas que `keep` acepta. Los turnos se atribuyen a la carpeta de la
+    /// sesión a la que pertenecen.
+    pub fn summarize_where(
+        &self,
+        start: Option<i64>,
+        end: i64,
+        local: LocalTime,
+        keep: &dyn Fn(&str) -> bool,
+    ) -> Summary {
         let previous_start = start.map(|s| s - (end - s));
         let mut seen = HashSet::new();
         let mut seen_prompts = HashSet::new();
@@ -546,7 +564,17 @@ impl Library {
         let in_previous = |ts: i64| matches!((previous_start, start), (Some(p), Some(s)) if ts >= p && ts < s);
 
         for file in self.files.values() {
+            let kept: Vec<bool> = file.projects.iter().map(|p| keep(p)).collect();
+            let kept_sessions: HashSet<u64> = file
+                .events
+                .iter()
+                .filter(|e| kept[e.project as usize])
+                .map(|e| e.session)
+                .collect();
             for event in &file.events {
+                if !kept[event.project as usize] {
+                    continue;
+                }
                 let (current, earlier) = (in_range(event.ts), in_previous(event.ts));
                 // Al reanudar una conversación su historial se copia a otro
                 // fichero: el mismo mensaje no debe sumar dos veces.
@@ -585,6 +613,9 @@ impl Library {
                 }
             }
             for prompt in &file.prompts {
+                if !kept_sessions.contains(&prompt.session) {
+                    continue;
+                }
                 let (current, earlier) = (in_range(prompt.ts), in_previous(prompt.ts));
                 if !(current || earlier) || !seen_prompts.insert(prompt.key) {
                     continue;
@@ -887,6 +918,34 @@ mod tests {
         let models: Vec<(&str, u64, u64)> = summary.models.iter().map(|r| (r.name.as_str(), r.input, r.messages)).collect();
         assert_eq!(models, vec![("opus", 120, 2), ("haiku", 1, 1)]);
         assert_eq!(summary.projects.iter().map(|r| r.messages).sum::<u64>(), 3);
+    }
+
+    #[test]
+    fn a_summary_can_be_limited_to_some_folders() {
+        let mut library = Library::default();
+        library.insert(
+            "trabajo",
+            FileData {
+                models: vec!["opus".into()],
+                projects: vec!["/trabajo/app".into(), "/casa".into()],
+                events: vec![
+                    event(1, 1, 10 * DAY, 0, [10, 0, 0, 1]),
+                    Event { project: 1, ..event(2, 2, 10 * DAY + 60, 0, [7, 0, 0, 1]) },
+                ],
+                prompts: vec![
+                    Prompt { ts: 10 * DAY - 5, key: 100, session: 1 },
+                    Prompt { ts: 10 * DAY + 50, key: 101, session: 2 },
+                ],
+                ..FileData::default()
+            },
+        );
+        let root = Path::new("/trabajo");
+        let work = library.summarize_where(Some(9 * DAY), 12 * DAY, utc_local, &|cwd| is_under(cwd, root));
+        assert_eq!((work.totals.input, work.totals.messages, work.totals.turns, work.totals.sessions), (10, 1, 1, 1));
+        assert_eq!(work.projects.len(), 1);
+        let rest = library.summarize_where(Some(9 * DAY), 12 * DAY, utc_local, &|cwd| !is_under(cwd, root));
+        assert_eq!((rest.totals.input, rest.totals.turns), (7, 1));
+        assert!(!is_under("/trabajo2/app", root));
     }
 
     #[test]

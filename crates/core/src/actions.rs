@@ -132,6 +132,8 @@ pub const ACTIONS: &[ActionDef] = &[
     action("settings", "Ajustes", Category::App, &[("Ctrl+comma", true)]),
     action("shortcuts", "Atajos de teclado", Category::App, &[]),
     action("stats", "Estadísticas de uso", Category::App, &[("Ctrl+Shift+S", true)]),
+    action("scm", "Control de código fuente de la sesión", Category::App, &[("Ctrl+Shift+K", true)]),
+    action("toggle-panel", "Mostrar u ocultar la columna de listas", Category::App, &[("Ctrl+Shift+L", true)]),
 ];
 
 pub fn find(id: &str) -> Option<&'static ActionDef> {

@@ -13,5 +13,7 @@ rust-version = "1.85"
 opt-level = 2
 lto = "thin"
 codegen-units = 4
-strip = true
+# Se quita la información de depuración pero no los nombres de función: hacen
+# falta para que la pila de un fallo se pueda leer.
+strip = "debuginfo"
 panic = "abort"

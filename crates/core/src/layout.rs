@@ -91,6 +91,25 @@ impl Pane {
     }
 }
 
+/// Qué pestañas cierra [`Layout::close_tabs`] respecto de una dada.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseTabs {
+    Others,
+    Left,
+    Right,
+}
+
+impl CloseTabs {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "others" => Some(Self::Others),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Split {
     pub id: NodeId,
@@ -290,6 +309,55 @@ impl Layout {
             Some(pane) => self.pane_mut(pane).is_some_and(|p| p.remove(session)),
             None => false,
         }
+    }
+
+    /// Coloca la pestaña de `session` justo antes o después de la de
+    /// `target`, en el panel de esta, y la deja activa. Sirve para reordenar
+    /// dentro de un panel y para soltar una pestaña en un sitio concreto de otro.
+    pub fn move_tab(&mut self, session: &str, target: &str, after: bool) -> bool {
+        if session == target {
+            return false;
+        }
+        let Some(pane) = self.locate(target) else {
+            return false;
+        };
+        self.close_tab(session);
+        let Some(destination) = self.pane_mut(pane) else {
+            return false;
+        };
+        let Some(index) = destination.tabs.iter().position(|t| t == target) else {
+            return false;
+        };
+        let at = index + usize::from(after);
+        destination.tabs.insert(at, session.to_string());
+        destination.active = at;
+        self.focused = pane;
+        true
+    }
+
+    /// Cierra varias pestañas del panel de `anchor` de una vez: las demás, o
+    /// las que tiene a un lado. La de `anchor` queda activa. Devuelve cuántas
+    /// se cerraron.
+    pub fn close_tabs(&mut self, anchor: &str, which: CloseTabs) -> usize {
+        let Some(pane) = self.locate(anchor).and_then(|id| self.pane_mut(id)) else {
+            return 0;
+        };
+        let Some(index) = pane.tabs.iter().position(|t| t == anchor) else {
+            return 0;
+        };
+        let before = pane.tabs.len();
+        let mut position = 0;
+        pane.tabs.retain(|_| {
+            let keep = match which {
+                CloseTabs::Others => position == index,
+                CloseTabs::Left => position >= index,
+                CloseTabs::Right => position <= index,
+            };
+            position += 1;
+            keep
+        });
+        pane.active = pane.tabs.iter().position(|t| t == anchor).unwrap_or(0);
+        before - pane.tabs.len()
     }
 
     /// Descarta las sesiones que ya no existen.
@@ -753,6 +821,41 @@ mod tests {
         assert_eq!(tabs(&layout, right), vec!["a"]);
         assert_eq!(layout.pane(1).expect("panel").active_session(), Some("b"));
         assert!(!layout.open(999, "a"));
+    }
+
+    #[test]
+    fn tabs_can_be_reordered_and_closed_in_bulk() {
+        let mut layout = Layout::new();
+        for session in ["a", "b", "c", "d", "e"] {
+            layout.show(session);
+        }
+        assert!(layout.move_tab("e", "b", false));
+        assert_eq!(tabs(&layout, 1), vec!["a", "e", "b", "c", "d"]);
+        assert_eq!(layout.active_session(), Some("e"));
+        assert!(layout.move_tab("a", "d", true));
+        assert_eq!(tabs(&layout, 1), vec!["e", "b", "c", "d", "a"]);
+        assert!(!layout.move_tab("a", "a", true));
+        assert!(!layout.move_tab("a", "no-existe", true));
+        assert_eq!(tabs(&layout, 1), vec!["e", "b", "c", "d", "a"]);
+
+        assert_eq!(layout.close_tabs("c", CloseTabs::Right), 2);
+        assert_eq!(tabs(&layout, 1), vec!["e", "b", "c"]);
+        assert_eq!(layout.active_session(), Some("c"));
+        assert_eq!(layout.close_tabs("b", CloseTabs::Left), 1);
+        assert_eq!(tabs(&layout, 1), vec!["b", "c"]);
+        assert_eq!(layout.active_session(), Some("b"));
+        layout.show("f");
+        assert_eq!(layout.close_tabs("c", CloseTabs::Others), 2);
+        assert_eq!(tabs(&layout, 1), vec!["c"]);
+        assert_eq!(layout.close_tabs("c", CloseTabs::Others), 0);
+        assert_eq!(layout.close_tabs("no-existe", CloseTabs::Others), 0);
+
+        // Soltar sobre una pestaña de otro panel la lleva allí.
+        let right = layout.split(1, H, Side::After).expect("divide");
+        layout.show("x");
+        assert!(layout.move_tab("c", "x", false));
+        assert_eq!(tabs(&layout, right), vec!["c", "x"]);
+        assert!(tabs(&layout, 1).is_empty());
     }
 
     #[test]

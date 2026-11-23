@@ -6,10 +6,36 @@ Todos los cambios relevantes de ALarviTerm se anotan aquí. El formato sigue [Ke
 
 ### Añadido
 
-* Límites de uso de la cuenta en el pie: lo que queda de las ventanas de 5 horas y de 7 días y el tiempo hasta su reinicio.
-* Medidores en el pie con barras finas, mini gráficas de CPU y el consumo de la propia aplicación.
+* Límites de uso de la cuenta en el pie: lo usado de las ventanas de 5 horas y de 7 días y el tiempo hasta su reinicio.
+* Medidores en el pie con barras finas: CPU, memoria y red del equipo, con un panel ampliado al pasar el ratón que incluye la sesión activa y la propia aplicación.
 * Panel de estadísticas de uso de Claude Code, a partir de sus transcripciones locales.
+* Añadir a un proyecto conversaciones de Claude Code que ya existen, reanudándolas con su historial.
+* Argumentos propuestos al crear una sesión, en Ajustes.
+* Cuenta de Claude por proyecto: límites de uso separados por cuenta y filtro por cuenta en las estadísticas.
+* Encender y apagar de una vez las sesiones de un grupo o de un proyecto.
+* Menú contextual en las pestañas para cerrar esta, las demás o las de un lado, y reordenado arrastrando.
+* Programas que más CPU y memoria consumen en el panel del equipo, que queda fijo con un clic.
+* Icono nuevo de la aplicación.
+* Columna derecha con las listas que los complementos aportan para la sesión a la vista, y ejemplo `examples/plugins/pendientes`.
+* Imagen propia para cada proyecto, en lugar del icono de texto.
+* Un grupo plegado enseña el estado de sus sesiones: primero quien pide permiso o espera respuesta, después quien trabaja.
+* Modo de permisos de la sesión a la vista en el pie.
+* Pestaña de código en la columna izquierda: repositorios y árboles de trabajo de las carpetas abiertas, árbol de ficheros cambiados, comparación lado a lado con la última confirmación en el sitio de los terminales y editor con guardado.
+* Estado propio para las sesiones que terminaron su turno con un comando o un subagente en segundo plano, que ya no figuran como si esperasen respuesta.
+* Tema de Claude Code propio para las sesiones de ALarviTerm.
+* Registro en fichero, con la pila de llamadas de un fallo, y aviso al abrir tras un cierre inesperado.
+* Contexto usado por la sesión activa en el pie, y opción de no mostrar la línea de estado propia dentro de las sesiones.
 * Complementos: programas externos que añaden a cada sesión una etiqueta, un cronómetro y acciones. Contrato en `docs/PLUGINS.md` y ejemplo en `examples/plugins/cronometro`.
+
+### Cambiado
+
+* Las recargas por eventos de las sesiones se espacian y git y el consumo de la sesión se consultan como mucho cada cuatro segundos. Con cinco sesiones emitiendo cien eventos por segundo la aplicación pasa del 10 % al 2,6 % de un núcleo.
+
+### Corregido
+
+* Los colores de Claude Code se veían reducidos a 256 dentro de la aplicación. Ahora las sesiones reciben color de 24 bits.
+* Cierre inesperado al retirar un terminal mientras su proceso terminaba.
+* El instalador ya no sobrescribe en el sitio la biblioteca de terminal de una instancia abierta.
 
 ## [0.1.0] 2026-11-21
 

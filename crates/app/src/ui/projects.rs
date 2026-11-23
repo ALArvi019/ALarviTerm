@@ -18,6 +18,40 @@ pub fn label(project: &Project) -> String {
     }
 }
 
+/// Imagen del proyecto a tamaño de icono, si tiene una y se puede leer.
+pub fn image(project: &Project, size: i32) -> Option<gtk::Image> {
+    if project.image.is_empty() || !std::path::Path::new(&project.image).is_file() {
+        return None;
+    }
+    let image = gtk::Image::from_file(&project.image);
+    image.set_pixel_size(size);
+    Some(image)
+}
+
+/// Etiqueta del proyecto para la fila de una sesión: su imagen o su icono de
+/// texto, y el nombre, con su color.
+pub fn chip(project: &Project) -> gtk::Box {
+    let chip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    chip.add_css_class("mt-project");
+    if let Some(class) = color_class(project) {
+        chip.add_css_class(&class);
+    }
+    let text = match image(project, 13) {
+        Some(picture) => {
+            chip.append(&picture);
+            project.name.clone()
+        }
+        None => label(project),
+    };
+    let name = gtk::Label::new(Some(&text));
+    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    name.set_max_width_chars(12);
+    chip.append(&name);
+    chip.set_valign(gtk::Align::Center);
+    chip.set_tooltip_text(Some(&format!("Proyecto {}", project.name)));
+    chip
+}
+
 /// Clase CSS del color de un proyecto, si tiene.
 pub fn color_class(project: &Project) -> Option<String> {
     (!project.color.is_empty()).then(|| format!("c-{}", project.color))
@@ -30,6 +64,10 @@ pub struct ManagerCallbacks {
     pub delete: Box<dyn Fn(i64)>,
     /// Sesión nueva de Claude Code en el proyecto.
     pub launch: Box<dyn Fn(i64)>,
+    /// Traer conversaciones de Claude Code que ya existen en su carpeta.
+    pub import: Box<dyn Fn(i64)>,
+    /// Encender las sesiones del proyecto si están paradas, o apagarlas.
+    pub power: Box<dyn Fn(i64)>,
 }
 
 /// Lista de proyectos. Se cierra antes de cada orden y la ventana la vuelve a
@@ -58,13 +96,17 @@ pub fn manager(
             .build();
         let chip = gtk::Label::new(Some("●"));
         chip.add_css_class("mt-project");
-        if let Some(class) = color_class(project) {
+        if let Some(picture) = image(project, 20) {
+            row.add_prefix(&picture);
+        } else if let Some(class) = color_class(project) {
             chip.add_css_class(&class);
             row.add_prefix(&chip);
         }
         type Order = fn(&ManagerCallbacks, i64);
-        let buttons: [(&str, &str, Order); 3] = [
+        let buttons: [(&str, &str, Order); 5] = [
+            ("system-shutdown-symbolic", "Encender las sesiones de este proyecto, o apagarlas si están en marcha", |c, id| (c.power)(id)),
             ("list-add-symbolic", "Nueva sesión de Claude Code en este proyecto", |c, id| (c.launch)(id)),
+            ("document-open-recent-symbolic", "Añadir conversaciones existentes", |c, id| (c.import)(id)),
             ("document-edit-symbolic", "Editar", |c, id| (c.edit)(id)),
             ("user-trash-symbolic", "Eliminar", |c, id| (c.delete)(id)),
         ];
@@ -138,12 +180,45 @@ pub fn editor(
     let icon = adw::EntryRow::builder()
         .title("Icono (uno o dos caracteres, puede ser un emoji)")
         .build();
+    let picture = adw::EntryRow::builder()
+        .title("Imagen (un fichero PNG, SVG, ICO o JPEG, opcional)")
+        .build();
+    let pick = gtk::Button::from_icon_name("image-x-generic-symbolic");
+    pick.set_valign(gtk::Align::Center);
+    pick.add_css_class("flat");
+    pick.set_tooltip_text(Some("Elegir imagen"));
+    picture.add_suffix(&pick);
+    {
+        let (picture, parent) = (picture.clone(), parent.clone());
+        pick.connect_clicked(move |_| {
+            let filter = gtk::FileFilter::new();
+            filter.add_pixbuf_formats();
+            filter.set_name(Some("Imágenes"));
+            let chooser = gtk::FileDialog::builder().title("Imagen del proyecto").modal(true).build();
+            chooser.set_default_filter(Some(&filter));
+            let picture = picture.clone();
+            chooser.open(Some(&parent), gio::Cancellable::NONE, move |result| {
+                // Cancelar el selector llega como error, no hay nada que avisar.
+                if let Some(path) = result.ok().and_then(|file| file.path()) {
+                    picture.set_text(&display_path(&path));
+                }
+            });
+        });
+    }
     let env = adw::EntryRow::builder()
         .title("Variables de entorno (CLAVE=valor ...)")
         .build();
     let startup = adw::EntryRow::builder()
         .title("Comando de inicio (se ejecuta antes de cada sesión)")
         .build();
+    let account = adw::EntryRow::builder()
+        .title("Cuenta de Claude (vacío: la predeterminada)")
+        .build();
+    account.set_tooltip_text(Some(
+        "Un nombre a tu elección para la cuenta con la que trabajan las sesiones de este proyecto, \
+         por ejemplo cuando el comando de inicio pone otro token. Separa los límites de uso y las \
+         estadísticas de cada cuenta. Aquí no se guarda ninguna credencial.",
+    ));
 
     match existing {
         Some(project) => {
@@ -157,6 +232,10 @@ pub fn editor(
             icon.set_text(&project.icon);
             env.set_text(&format_env_assignments(&project.env));
             startup.set_text(&project.startup);
+            account.set_text(&project.account);
+            if !project.image.is_empty() {
+                picture.set_text(&display_path(std::path::Path::new(&project.image)));
+            }
         }
         None => {
             if let Ok(home) = home_dir() {
@@ -171,6 +250,7 @@ pub fn editor(
     let look = adw::PreferencesGroup::builder().title("Aspecto").build();
     look.add(&color);
     look.add(&icon);
+    look.add(&picture);
     let launch = adw::PreferencesGroup::builder()
         .title("Entorno de sus sesiones")
         .description(
@@ -180,6 +260,7 @@ pub fn editor(
         .build();
     launch.add(&env);
     launch.add(&startup);
+    launch.add(&account);
 
     let error = gtk::Label::new(None);
     error.add_css_class("error");
@@ -242,6 +323,7 @@ pub fn editor(
 
     let submit: Rc<dyn Fn()> = {
         let dialog = dialog.clone();
+        let (account, picture) = (account.clone(), picture.clone());
         let (name, directory, color, icon, env, startup, error) = (
             name.clone(),
             directory.clone(),
@@ -272,6 +354,11 @@ pub fn editor(
                         icon: icon.text().to_string(),
                         env,
                         startup: startup.text().to_string(),
+                        account: account.text().to_string(),
+                        image: match picture.text().trim() {
+                            "" => String::new(),
+                            path => expand_tilde(path).to_string_lossy().into_owned(),
+                        },
                     })
                 });
             match result {

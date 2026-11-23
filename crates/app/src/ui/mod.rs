@@ -1,3 +1,4 @@
+pub mod codebar;
 pub mod dialogs;
 pub mod dnd;
 pub mod footer;
@@ -7,8 +8,10 @@ pub mod palette;
 pub mod panes;
 pub mod prefs;
 pub mod projects;
+pub mod scm;
 pub mod shortcuts;
 pub mod sidebar;
+pub mod sidepanel;
 pub mod stats;
 pub mod status;
 pub mod style;

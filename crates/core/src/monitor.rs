@@ -42,6 +42,8 @@ pub const HOOK_EVENTS: &[&str] = &[
     "PermissionRequest",
     "Notification",
     "Stop",
+    "SubagentStart",
+    "SubagentStop",
     "PreCompact",
     "SessionEnd",
 ];
@@ -112,6 +114,21 @@ pub struct AgentState {
     pub model: Option<String>,
     /// Lanzamiento del proceso que emitió el evento.
     pub launch: Option<String>,
+    /// Subagentes en marcha. Con el turno terminado, los que quedan trabajan
+    /// en segundo plano.
+    pub subagents: u32,
+    /// Si Claude Code dice tener un comando de shell corriendo en segundo
+    /// plano. No viene de los hooks: lo rellena quien lee el estado, con lo
+    /// que el propio Claude Code publica de sus sesiones.
+    pub background_shell: bool,
+}
+
+impl AgentState {
+    /// El turno terminó pero la sesión sigue ocupada por su cuenta: no espera
+    /// al usuario, espera a que acabe un comando o un subagente.
+    pub fn busy_in_background(&self) -> bool {
+        matches!(self.phase, Phase::Waiting | Phase::Ready) && (self.background_shell || self.subagents > 0)
+    }
 }
 
 impl AgentState {
@@ -127,6 +144,7 @@ impl AgentState {
             "permission_mode": self.permission_mode,
             "model": self.model,
             "launch": self.launch,
+            "subagents": self.subagents,
         })
         .to_string()
     }
@@ -144,6 +162,8 @@ impl AgentState {
             permission_mode: text_field(&value, "permission_mode"),
             model: text_field(&value, "model"),
             launch: text_field(&value, "launch"),
+            subagents: value.get("subagents").and_then(Value::as_u64).unwrap_or(0) as u32,
+            background_shell: false,
         })
     }
 }
@@ -163,6 +183,21 @@ pub fn apply_event(previous: Option<&AgentState>, event: &Value, now: i64) -> Op
     let tool = text_field(event, "tool_name");
     let previous_tool = previous.and_then(|p| p.tool.clone());
 
+    // Los subagentes no cambian la fase: solo se lleva la cuenta de cuántos
+    // hay en marcha.
+    if name == "SubagentStart" || name == "SubagentStop" {
+        let previous = previous?;
+        let subagents = if name == "SubagentStart" {
+            previous.subagents.saturating_add(1)
+        } else {
+            previous.subagents.saturating_sub(1)
+        };
+        // Un aviso de fin que llega sin nadie en la cuenta no cambia nada.
+        if subagents == previous.subagents {
+            return None;
+        }
+        return Some(AgentState { subagents, updated_at: now, ..previous.clone() });
+    }
     let (phase, tool, message) = match name {
         "SessionStart" => {
             // Tras una compactación automática Claude sigue con su turno.
@@ -212,6 +247,13 @@ pub fn apply_event(previous: Option<&AgentState>, event: &Value, now: i64) -> Op
         permission_mode: keep("permission_mode", |p| p.permission_mode.clone()),
         model: previous.and_then(|p| p.model.clone()),
         launch: previous.and_then(|p| p.launch.clone()),
+        // Un arranque limpio empieza de cero. Si un evento se perdió, aquí
+        // se corrige.
+        subagents: match name {
+            "SessionStart" | "SessionEnd" => 0,
+            _ => previous.map_or(0, |p| p.subagents),
+        },
+        background_shell: false,
     })
 }
 
@@ -306,13 +348,29 @@ pub fn valid_session_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// Qué hace ALarviTerm con la línea de estado de las sesiones que lanza.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusLine {
+    /// No se registra nada: la del usuario funciona como siempre y no se
+    /// recogen límites ni contexto.
+    Untouched,
+    /// Se recogen los datos y después se ejecuta la del usuario.
+    Chained,
+    /// Se recogen los datos y no se muestra ninguna.
+    Quiet,
+}
+
 /// Contenido del fichero de ajustes que registra `alarviterm-hook` en Claude
 /// Code. Los hooks se suman a los ajustes del usuario.
 ///
 /// Con `statusline` registra además el hook como línea de estado, que es por
-/// donde Claude Code comunica los límites de uso de la cuenta. El hook ejecuta
-/// después la línea de estado del usuario, así que la suya se sigue viendo.
-pub fn hook_settings(hook_binary: &Path, statusline: bool) -> Result<String> {
+/// donde Claude Code comunica los límites de uso de la cuenta y el contexto
+/// de la sesión. El hook ejecuta después la línea de estado del usuario, así
+/// que la suya se sigue viendo, salvo que se pida que calle.
+///
+/// `theme` es el tema de Claude Code para estas sesiones, con el nombre que
+/// tendría en sus ajustes (`dark`, `custom:mi-tema`). Sin él vale el del usuario.
+pub fn hook_settings(hook_binary: &Path, statusline: StatusLine, theme: Option<&str>) -> Result<String> {
     let command = shlex::try_quote(&hook_binary.to_string_lossy())
         .map_err(|_| crate::Error::Invalid("ruta del hook con un carácter nulo".into()))?
         .into_owned();
@@ -324,10 +382,18 @@ pub fn hook_settings(hook_binary: &Path, statusline: bool) -> Result<String> {
         );
     }
     let mut settings = json!({ "hooks": hooks });
-    if statusline {
+    if let Some(theme) = theme.map(str::trim).filter(|t| !t.is_empty()) {
+        settings["theme"] = json!(theme);
+    }
+    let quiet = match statusline {
+        StatusLine::Untouched => None,
+        StatusLine::Chained => Some(""),
+        StatusLine::Quiet => Some(crate::limits::QUIET_ARG),
+    };
+    if let Some(quiet) = quiet {
         settings["statusLine"] = json!({
             "type": "command",
-            "command": format!("{command} {}", crate::limits::STATUSLINE_ARG),
+            "command": format!("{command} {} {quiet}", crate::limits::STATUSLINE_ARG).trim_end(),
         });
     }
     Ok(serde_json::to_string_pretty(&settings).unwrap_or_default())
@@ -432,6 +498,38 @@ mod tests {
     }
 
     #[test]
+    fn subagents_are_counted_without_changing_the_phase() {
+        let state = run(&[
+            event("UserPromptSubmit", json!({})),
+            event("SubagentStart", json!({})),
+            event("SubagentStart", json!({})),
+            event("Stop", json!({})),
+            event("SubagentStop", json!({})),
+        ])
+        .expect("estado");
+        assert_eq!((state.phase, state.subagents), (Phase::Waiting, 1));
+        assert!(!state.busy_in_background() || state.subagents == 1);
+        assert!(state.busy_in_background());
+        let again = AgentState::from_json(&state.to_json()).expect("json");
+        assert_eq!(again.subagents, 1);
+
+        let done = run(&[
+            event("UserPromptSubmit", json!({})),
+            event("SubagentStart", json!({})),
+            event("SubagentStop", json!({})),
+            event("SubagentStop", json!({})),
+            event("Stop", json!({})),
+        ])
+        .expect("estado");
+        assert_eq!(done.subagents, 0, "nunca baja de cero");
+        assert!(!done.busy_in_background());
+        // Un arranque nuevo empieza de cero aunque se perdiera un evento.
+        let fresh = run(&[event("SubagentStart", json!({})), event("SessionStart", json!({"source": "startup"}))]);
+        assert_eq!(fresh.expect("estado").subagents, 0);
+        assert!(apply_event(None, &event("SubagentStart", json!({})), 1).is_none());
+    }
+
+    #[test]
     fn permission_is_reported_and_cleared_by_the_tool_result() {
         let asking = run(&[
             event("PreToolUse", json!({"tool_name": "Write"})),
@@ -533,7 +631,7 @@ mod tests {
 
     #[test]
     fn settings_register_every_event_with_a_quoted_command() {
-        let text = hook_settings(Path::new("/opt/mi app/alarviterm-hook"), false).expect("ajustes");
+        let text = hook_settings(Path::new("/opt/mi app/alarviterm-hook"), StatusLine::Untouched, None).expect("ajustes");
         let value: Value = serde_json::from_str(&text).expect("json");
         let hooks = value.get("hooks").and_then(Value::as_object).expect("hooks");
         assert_eq!(hooks.len(), HOOK_EVENTS.len());
@@ -544,13 +642,20 @@ mod tests {
         );
         assert!(value.get("statusLine").is_none());
 
-        let text = hook_settings(Path::new("/opt/mi app/alarviterm-hook"), true).expect("ajustes");
+        let text = hook_settings(Path::new("/opt/mi app/alarviterm-hook"), StatusLine::Chained, Some(" ")).expect("ajustes");
         let value: Value = serde_json::from_str(&text).expect("json");
         assert_eq!(value["statusLine"]["type"], "command");
         assert_eq!(
             shlex::split(value["statusLine"]["command"].as_str().expect("comando")).expect("se puede trocear"),
             vec!["/opt/mi app/alarviterm-hook", "statusline"]
         );
+
+        assert!(value.get("theme").is_none());
+
+        let text = hook_settings(Path::new("/opt/hook"), StatusLine::Quiet, Some("custom:limpio")).expect("ajustes");
+        let value: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(value["theme"], "custom:limpio");
+        assert_eq!(value["statusLine"]["command"], "/opt/hook statusline --quiet");
     }
 
     #[test]

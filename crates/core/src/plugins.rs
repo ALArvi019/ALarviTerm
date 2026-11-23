@@ -36,6 +36,8 @@ const MAX_TIMEOUT: u64 = 60;
 const MAX_OUTPUT: u64 = 1024 * 1024;
 /// Acciones que se aceptan por sesión, para que un fallo no llene la lista.
 const MAX_ACTIONS: usize = 12;
+const MAX_PANEL_ITEMS: usize = 200;
+const MAX_PANEL_TEXT: usize = 400;
 
 /// Un complemento instalado.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +212,8 @@ pub struct SessionInfo {
     pub group: Option<String>,
     pub project: Option<String>,
     pub alive: bool,
+    /// Conversación de Claude Code que lleva la sesión, si se conoce.
+    pub conversation: Option<String>,
 }
 
 impl SessionInfo {
@@ -222,6 +226,7 @@ impl SessionInfo {
             group: group.map(str::to_string),
             project: project.map(str::to_string),
             alive: view.liveness.is_alive(),
+            conversation: view.agent.as_ref().and_then(|agent| agent.conversation.clone()),
         }
     }
 
@@ -234,6 +239,7 @@ impl SessionInfo {
             "group": self.group,
             "project": self.project,
             "alive": self.alive,
+            "conversation": self.conversation,
         })
     }
 }
@@ -277,6 +283,46 @@ pub struct SessionExtras {
     pub timer_since: Option<i64>,
     pub tooltip: Option<String>,
     pub actions: Vec<PluginAction>,
+    /// Lista que se enseña en la columna lateral cuando la sesión está a la vista.
+    pub panel: Option<Panel>,
+}
+
+/// Una lista de elementos de un complemento para una sesión: tareas,
+/// avisos, enlaces de lectura.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Panel {
+    pub title: String,
+    pub items: Vec<PanelItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PanelItem {
+    pub text: String,
+    /// `Some` si el elemento se puede marcar: hecho o pendiente.
+    pub done: Option<bool>,
+}
+
+impl Panel {
+    fn parse(value: &Value) -> Option<Self> {
+        let items: Vec<PanelItem> = value
+            .get("items")?
+            .as_array()?
+            .iter()
+            .filter_map(|item| {
+                let content: String = text(item, "text")?.chars().take(MAX_PANEL_TEXT).collect();
+                Some(PanelItem { text: content, done: item.get("done").and_then(Value::as_bool) })
+            })
+            .take(MAX_PANEL_ITEMS)
+            .collect();
+        Some(Self { title: text(value, "title").unwrap_or_default(), items })
+    }
+
+    /// Cuántos elementos marcables hay y cuántos están hechos.
+    pub fn progress(&self) -> (usize, usize) {
+        let countable = self.items.iter().filter(|i| i.done.is_some()).count();
+        let done = self.items.iter().filter(|i| i.done == Some(true)).count();
+        (done, countable)
+    }
 }
 
 /// Respuesta de la orden `status`.
@@ -331,6 +377,7 @@ impl PluginStatus {
                     timer_since: entry.get("timer_since").and_then(Value::as_f64).map(|t| t as i64),
                     tooltip: text(entry, "tooltip"),
                     actions,
+                    panel: entry.get("panel").and_then(Panel::parse),
                 };
                 if extras != SessionExtras::default() {
                     sessions.insert(id.clone(), extras);
@@ -380,6 +427,26 @@ pub fn timer_text(since: i64, now: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_can_carry_a_panel_of_items() {
+        let status = PluginStatus::parse(
+            r#"{"sessions": {"a": {"badge": "1/2", "panel": {"title": "Tareas", "items": [
+                {"text": " Revisar el despliegue ", "done": false},
+                {"text": "Subir la rama", "done": true},
+                {"text": "Nota suelta"},
+                {"done": true}
+            ]}}, "b": {"panel": {"items": "no es una lista"}}}}"#,
+        )
+        .expect("estado");
+        let panel = status.sessions["a"].panel.clone().expect("panel");
+        assert_eq!(panel.title, "Tareas");
+        assert_eq!(panel.items.len(), 3, "un elemento sin texto se descarta");
+        assert_eq!(panel.items[0], PanelItem { text: "Revisar el despliegue".into(), done: Some(false) });
+        assert_eq!(panel.items[2].done, None);
+        assert_eq!(panel.progress(), (1, 2));
+        assert!(!status.sessions.contains_key("b"));
+    }
     use std::os::unix::fs::PermissionsExt;
 
     fn scratch(tag: &str) -> PathBuf {
@@ -408,6 +475,7 @@ mod tests {
             group: None,
             project: Some("Web".into()),
             alive: true,
+            conversation: None,
         }
     }
 

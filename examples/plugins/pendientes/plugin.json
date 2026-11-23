@@ -1,0 +1,6 @@
+{
+  "name": "Pendientes",
+  "command": ["./pendientes.py"],
+  "interval": 10,
+  "timeout": 5
+}

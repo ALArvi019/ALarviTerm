@@ -102,6 +102,22 @@ headerbar {
   letter-spacing: 0.08em;
   color: @mt_soft;
 }
+button.mt-group-power {
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0 2px;
+  color: @mt_dim;
+}
+button.mt-group-power.on {
+  color: @mt_green;
+}
+button.mt-group-power:hover {
+  color: @window_fg_color;
+}
+.mt-group-state {
+  font-size: 0.78em;
+  color: @mt_soft;
+}
 .mt-group-count {
   font-size: 0.78em;
   color: @mt_dim;
@@ -132,6 +148,7 @@ headerbar {
 .mt-dot.st-alive { background-color: @mt_green; }
 .mt-dot.st-working { background-color: @mt_blue; }
 .mt-dot.st-waiting { background-color: @mt_green; }
+.mt-dot.st-background { background-color: #bc8cff; }
 .mt-dot.st-attention {
   background-color: @mt_amber;
   box-shadow: 0 0 0 3px alpha(@mt_amber, 0.28);
@@ -157,6 +174,87 @@ headerbar {
 .mt-footer .mt-footer-strong {
   color: @window_fg_color;
 }
+.mt-footer .mt-footer-link:hover {
+  color: @window_fg_color;
+}
+.mt-side-tabs {
+  margin: 8px 10px 2px 10px;
+}
+.mt-side-tabs > button {
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 0.9em;
+  font-weight: 600;
+}
+.mt-code-files {
+  background: none;
+}
+.mt-code-repo {
+  font-weight: 700;
+}
+.mt-code-repo-row {
+  margin-top: 4px;
+}
+.mt-code-count {
+  padding: 0 6px;
+  border-radius: 8px;
+  background-color: @mt_tint;
+  font-size: 0.8em;
+  color: @mt_soft;
+}
+.mt-code-view {
+  background-color: @view_bg_color;
+}
+listbox.mt-code-files > row {
+  min-height: 24px;
+  padding: 1px 8px;
+  margin: 0 6px;
+}
+.mt-code-summary {
+  padding: 10px 14px 6px 14px;
+}
+.mt-code-folder {
+  color: @mt_soft;
+}
+.mt-code-deleted {
+  text-decoration: line-through;
+  color: @mt_dim;
+}
+.mt-code-status {
+  font-family: monospace;
+  font-weight: 700;
+  font-size: 0.85em;
+  min-width: 14px;
+}
+.mt-code-status.s-modified { color: @mt_amber; }
+.mt-code-status.s-added { color: @mt_green; }
+.mt-code-status.s-deleted { color: @mt_red; }
+.mt-code-status.s-conflict { color: @mt_red; }
+.mt-code-bar {
+  padding: 5px 8px 5px 14px;
+  border-bottom: 1px solid @mt_border;
+}
+.mt-code-title {
+  font-family: monospace;
+  font-size: 0.92em;
+}
+.mt-code-caption {
+  padding: 4px 12px;
+  border-bottom: 1px solid @mt_border;
+}
+.mt-code-branch {
+  font-family: monospace;
+  font-size: 0.88em;
+  color: @mt_soft;
+}
+.mt-code {
+  font-size: 0.95em;
+}
+.mt-footer .mt-footer-mode {
+  padding: 0 6px;
+  border-radius: 4px;
+  background-color: @mt_tint;
+}
 .mt-footer .mt-footer-warn {
   color: @mt_amber;
 }
@@ -175,6 +273,52 @@ headerbar {
 }
 .mt-spark {
   color: @mt_blue;
+}
+.mt-tab.drop-before {
+  box-shadow: inset 2px 0 0 @accent_color;
+}
+.mt-tab.drop-after {
+  box-shadow: inset -2px 0 0 @accent_color;
+}
+.mt-panel {
+  border-left: 1px solid @mt_border;
+  background-color: @sidebar_bg_color;
+}
+.mt-panel-header {
+  padding: 8px 6px 4px 14px;
+}
+.mt-panel-body {
+  padding: 6px 14px 16px 14px;
+}
+.mt-panel-empty {
+  color: @mt_dim;
+}
+.mt-panel-mark {
+  color: @mt_blue;
+  min-width: 12px;
+}
+.mt-panel-item.done,
+.mt-panel-item.done .mt-panel-mark {
+  color: @mt_gray;
+}
+progressbar.mt-meter-wide > trough { min-width: 200px; }
+.mt-net-down,
+.mt-footer .mt-net-down {
+  color: @mt_blue;
+  font-weight: 700;
+}
+.mt-net-up,
+.mt-footer .mt-net-up {
+  color: @mt_red;
+  font-weight: 700;
+}
+.mt-chart-box {
+  border-radius: 6px;
+  background-color: @mt_tint;
+}
+progressbar.mt-meter-short > trough { min-width: 34px; }
+.mt-footer menubutton.mt-stat-button.pinned > button {
+  background-color: @mt_tint;
 }
 .mt-footer menubutton.mt-stat-button > button {
   min-height: 20px;

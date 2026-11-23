@@ -162,11 +162,18 @@ pub struct Settings {
     pub shell: String,
     /// Modelo que propone el formulario de sesión nueva.
     pub default_model: String,
+    /// Argumentos que propone el formulario de sesión nueva para Claude Code.
+    pub default_args: String,
+    /// Tema de Claude Code para las sesiones de ALarviTerm. Vacío: el del usuario.
+    pub claude_theme: String,
     pub footer_git: bool,
     pub footer_model: bool,
     pub footer_usage: bool,
     /// Recoger y mostrar los límites de uso de la cuenta de Claude.
     pub account_limits: bool,
+    /// Mostrar bajo el cuadro de texto de Claude Code la línea de estado que
+    /// el usuario tiene en sus ajustes.
+    pub session_statusline: bool,
     pub notify_permission: bool,
     pub notify_turn_end: bool,
     /// Nunca está vacía.
@@ -184,10 +191,13 @@ impl Default for Settings {
             claude_path: String::new(),
             shell: String::new(),
             default_model: String::new(),
+            default_args: String::new(),
+            claude_theme: String::new(),
             footer_git: true,
             footer_model: true,
             footer_usage: true,
             account_limits: true,
+            session_statusline: true,
             notify_permission: true,
             notify_turn_end: true,
             profiles: vec![Profile::default()],
@@ -197,6 +207,18 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Qué se registra como línea de estado en las sesiones.
+    pub fn statusline(&self) -> crate::monitor::StatusLine {
+        use crate::monitor::StatusLine;
+        if !self.session_statusline {
+            StatusLine::Quiet
+        } else if self.account_limits {
+            StatusLine::Chained
+        } else {
+            StatusLine::Untouched
+        }
+    }
+
     pub fn from_json(text: &str) -> Self {
         let default = Self::default();
         let Ok(value) = serde_json::from_str::<Value>(text) else {
@@ -214,10 +236,13 @@ impl Settings {
             claude_path: text("claude_path").unwrap_or_default(),
             shell: text("shell").unwrap_or_default(),
             default_model: text("default_model").unwrap_or_default(),
+            default_args: text("default_args").unwrap_or_default(),
+            claude_theme: text("claude_theme").unwrap_or_default(),
             footer_git: flag("footer_git", default.footer_git),
             footer_model: flag("footer_model", default.footer_model),
             footer_usage: flag("footer_usage", default.footer_usage),
             account_limits: flag("account_limits", default.account_limits),
+            session_statusline: flag("session_statusline", default.session_statusline),
             notify_permission: flag("notify_permission", default.notify_permission),
             notify_turn_end: flag("notify_turn_end", default.notify_turn_end),
             profiles: value
@@ -239,10 +264,13 @@ impl Settings {
             "claude_path": self.claude_path,
             "shell": self.shell,
             "default_model": self.default_model,
+            "default_args": self.default_args,
+            "claude_theme": self.claude_theme,
             "footer_git": self.footer_git,
             "footer_model": self.footer_model,
             "footer_usage": self.footer_usage,
             "account_limits": self.account_limits,
+            "session_statusline": self.session_statusline,
             "notify_permission": self.notify_permission,
             "notify_turn_end": self.notify_turn_end,
             "profiles": self.profiles.iter().map(Profile::to_json).collect::<Vec<_>>(),
@@ -330,10 +358,13 @@ mod tests {
             claude_path: "/opt/claude".into(),
             shell: "/bin/bash".into(),
             default_model: "opus".into(),
+            default_args: "--verbose".into(),
+            claude_theme: "custom:limpio".into(),
             footer_git: false,
             footer_model: true,
             footer_usage: false,
             account_limits: false,
+            session_statusline: false,
             notify_permission: true,
             notify_turn_end: false,
             profiles: vec![

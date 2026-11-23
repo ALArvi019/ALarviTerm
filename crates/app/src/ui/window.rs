@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use alarviterm_core::actions::{self, Keymap};
-use alarviterm_core::claude::{self, AuthHint, Resume};
+use alarviterm_core::claude::{self, conversations, AuthHint, Resume};
 use alarviterm_core::limits;
 use alarviterm_core::layout::{Direction, Layout, NodeId, Orientation, Preset, Side};
 use alarviterm_core::model::{NewProject, NewSession, SessionKind};
@@ -25,7 +25,9 @@ use alarviterm_core::sessions::{
 use alarviterm_core::settings::Settings;
 use alarviterm_core::sysinfo::{self, GitSummary, Usage};
 
+use super::codebar::{CodeBar, CodeBarCallbacks};
 use super::dialogs::{self, NewSessionDefaults};
+use super::scm::{CodeCallbacks, CodeView};
 use super::dnd::SessionRef;
 use super::footer::Footer;
 use super::icons::{self, Icon};
@@ -37,6 +39,7 @@ use super::projects::{self, ManagerCallbacks};
 use super::shortcuts;
 use super::stats;
 use super::sidebar::{self, RowButton, RowExtra, RowTarget, SearchCallbacks, Sidebar};
+use super::sidepanel::SidePanel;
 use super::status;
 use super::style;
 use super::terminal;
@@ -46,8 +49,26 @@ use super::terminal;
 /// plano no se consulta nada.
 const REFRESH_SECONDS: u32 = 10;
 
+/// Cada cuánto se mide el consumo del equipo para el pie.
+const SYSTEM_SECONDS: u32 = 2;
+
+/// Conjunto de sesiones sobre el que actúa una orden en bloque.
+#[derive(Debug, Clone, Copy)]
+enum Batch {
+    Group(i64),
+    Project(i64),
+}
+
 /// Margen para agrupar los eventos de hooks que llegan en ráfaga.
 const EVENT_DEBOUNCE: Duration = Duration::from_millis(80);
+
+/// Distancia mínima entre dos recargas provocadas por eventos de hooks.
+const EVENT_SPACING: Duration = Duration::from_millis(300);
+
+/// Cada cuánto se vuelven a consultar git y el consumo de la sesión a la vista
+/// mientras no cambie de sesión. Cada consulta lanza `git status` y recorre
+/// los procesos del equipo.
+const DETAILS_EVERY: Duration = Duration::from_secs(4);
 
 /// Tiempo que un terminal puede pasar oculto antes de desconectarse.
 const HIDDEN_TERMINAL_TTL: Duration = Duration::from_secs(300);
@@ -64,6 +85,10 @@ fn hidden_terminal_ttl() -> Duration {
 
 const PAGE_EMPTY: &str = "page-empty";
 const PAGE_PANES: &str = "page-panes";
+const LEFT_SESSIONS: &str = "left-sessions";
+const LEFT_CODE: &str = "left-code";
+const CENTER_TERMINALS: &str = "center-terminals";
+const CENTER_CODE: &str = "center-code";
 
 const KEY_LAST_SESSION: &str = "ui.last_session";
 const KEY_LAYOUT: &str = "ui.layout";
@@ -113,11 +138,33 @@ struct Inner {
     /// Sesión cuyos datos muestra el pie y consulta en curso, si la hay.
     details_for: RefCell<Option<String>>,
     details_busy: Cell<bool>,
+    /// Cuándo se consultaron por última vez git y el consumo de la sesión.
+    details_at: Cell<Option<Instant>>,
+    /// Cuándo se hizo la última recarga provocada por eventos de hooks.
+    event_reload_at: Cell<Option<Instant>>,
     cpu_sample: RefCell<Option<(String, u64, Instant)>>,
     /// Transcripciones ya leídas, para el panel de estadísticas.
     stats_library: stats::SharedLibrary,
     /// Muestra anterior de CPU de la propia aplicación.
     app_sample: Cell<Option<(u64, Instant)>>,
+    /// Tabla de procesos de la muestra anterior, mientras el panel del equipo
+    /// está abierto.
+    process_sample: RefCell<Option<(sysinfo::ProcessTable, Instant)>>,
+    process_busy: Cell<bool>,
+    side_panel: SidePanel,
+    /// Columna izquierda entera: las pestañas y lo que enseñan.
+    left: gtk::Box,
+    left_stack: gtk::Stack,
+    sessions_tab: gtk::ToggleButton,
+    code_tab: gtk::ToggleButton,
+    /// Terminales o comparación de código.
+    center: gtk::Stack,
+    codebar: Rc<CodeBar>,
+    code_view: Rc<CodeView>,
+    code_busy: Cell<bool>,
+    /// Carpeta cuyo repositorio hay que desplegar cuando acabe la lectura, y
+    /// si además hay que abrir su primer cambio.
+    code_expand: RefCell<Option<(std::path::PathBuf, bool)>>,
     /// Atajos vigentes. Lo comparte el editor de atajos.
     keymap: Rc<RefCell<Keymap>>,
     settings: Rc<RefCell<Settings>>,
@@ -197,7 +244,7 @@ impl MainWindow {
         match monitor::find_hook_binary() {
             Some(hook) => {
                 let file = paths.hook_settings();
-                std::fs::write(&file, monitor::hook_settings(&hook, settings.account_limits)?)?;
+                std::fs::write(&file, monitor::hook_settings(&hook, settings.statusline(), Some(&settings.claude_theme))?)?;
                 manager.enable_monitor(store.clone(), file);
             }
             None => log::warn!(
@@ -256,6 +303,10 @@ impl MainWindow {
         header.pack_start(&toggle);
         header.pack_start(&add);
         header.pack_start(&layouts);
+        let lists = gtk::Button::from_icon_name("sidebar-show-right-symbolic");
+        lists.set_action_name(Some("win.toggle-panel"));
+        lists.set_tooltip_text(Some("Columna de listas de la sesión, como sus tareas"));
+        header.pack_end(&lists);
         let commands = gtk::Button::from_icon_name("system-search-symbolic");
         commands.set_action_name(Some("win.command-palette"));
         let main_menu = gio::Menu::new();
@@ -279,7 +330,70 @@ impl MainWindow {
 
         // Contenido
         let sidebar = Sidebar::new();
-        sidebar.root.set_visible(sidebar_visible);
+        // La columna izquierda tiene dos pestañas: las sesiones y el código.
+        // Sus manejadores necesitan la ventana, que aún no existe: la reciben
+        // después por este hueco.
+        let late: Rc<RefCell<Weak<Inner>>> = Rc::new(RefCell::new(Weak::new()));
+        let later = |late: &Rc<RefCell<Weak<Inner>>>| {
+            let late = late.clone();
+            move || late.borrow().upgrade().map(MainWindow)
+        };
+        let codebar = {
+            let (open, refresh) = (later(&late), later(&late));
+            CodeBar::new(CodeBarCallbacks {
+                open: Box::new(move |root, change| {
+                    if let Some(this) = open() {
+                        this.open_code(root, change);
+                    }
+                }),
+                refresh: Box::new(move || {
+                    if let Some(this) = refresh() {
+                        this.refresh_code();
+                    }
+                }),
+            })
+        };
+        let code_view = {
+            let (close, saved, notify) = (later(&late), later(&late), later(&late));
+            CodeView::new(CodeCallbacks {
+                close: Box::new(move || {
+                    if let Some(this) = close() {
+                        this.close_code();
+                    }
+                }),
+                saved: Box::new(move || {
+                    if let Some(this) = saved() {
+                        this.refresh_open_code();
+                    }
+                }),
+                notify: Box::new(move |message| {
+                    if let Some(this) = notify() {
+                        this.0.toasts.add_toast(adw::Toast::new(message));
+                    }
+                }),
+            })
+        };
+        let sessions_tab = gtk::ToggleButton::with_label("Sesiones");
+        let code_tab = gtk::ToggleButton::with_label("Código");
+        code_tab.set_group(Some(&sessions_tab));
+        sessions_tab.set_active(true);
+        code_tab.set_tooltip_text(Some("Control de código fuente de las carpetas abiertas"));
+        let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        tabs.add_css_class("linked");
+        tabs.add_css_class("mt-side-tabs");
+        tabs.set_homogeneous(true);
+        tabs.append(&sessions_tab);
+        tabs.append(&code_tab);
+        let left_stack = gtk::Stack::new();
+        left_stack.set_vexpand(true);
+        left_stack.add_named(&sidebar.root, Some(LEFT_SESSIONS));
+        left_stack.add_named(&codebar.root, Some(LEFT_CODE));
+        let left = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        left.add_css_class("mt-sidebar");
+        left.set_size_request(210, -1);
+        left.append(&tabs);
+        left.append(&left_stack);
+        left.set_visible(sidebar_visible);
         let pages = gtk::Stack::new();
         pages.set_hexpand(true);
         pages.set_vexpand(true);
@@ -301,8 +415,23 @@ impl MainWindow {
         pages.add_named(&holder, Some(PAGE_PANES));
 
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-        paned.set_start_child(Some(&sidebar.root));
-        paned.set_end_child(Some(&pages));
+        paned.set_start_child(Some(&left));
+        let work = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        pages.set_vexpand(true);
+        work.append(&pages);
+        work.set_hexpand(true);
+        // A la derecha, la columna con las listas de los complementos.
+        let side_panel = SidePanel::new();
+        // El centro enseña los terminales o, mientras se revisa código, la
+        // comparación de un fichero.
+        let center = gtk::Stack::new();
+        center.set_hexpand(true);
+        center.add_named(&work, Some(CENTER_TERMINALS));
+        center.add_named(&code_view.root, Some(CENTER_CODE));
+        let middle = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        middle.append(&center);
+        middle.append(&side_panel.root);
+        paned.set_end_child(Some(&middle));
         paned.set_resize_start_child(false);
         paned.set_shrink_start_child(false);
         paned.set_shrink_end_child(false);
@@ -350,8 +479,22 @@ impl MainWindow {
             phases: RefCell::new(HashMap::new()),
             details_for: RefCell::new(None),
             details_busy: Cell::new(false),
+            details_at: Cell::new(None),
+            event_reload_at: Cell::new(None),
             cpu_sample: RefCell::new(None),
             app_sample: Cell::new(None),
+            process_sample: RefCell::new(None),
+            process_busy: Cell::new(false),
+            side_panel,
+            left,
+            left_stack,
+            sessions_tab,
+            code_tab,
+            center,
+            codebar,
+            code_view,
+            code_busy: Cell::new(false),
+            code_expand: RefCell::new(None),
             stats_library: Default::default(),
             keymap: Rc::new(RefCell::new(keymap)),
             settings: Rc::new(RefCell::new(settings)),
@@ -407,6 +550,14 @@ impl MainWindow {
         this.watch_state(store.dir());
         this.refresh_limits();
         this.refresh_app_usage();
+        if this.0.manager.borrow().db().setting("ui.panel_visible").ok().flatten().as_deref() == Some("1") {
+            this.0.side_panel.root.set_visible(true);
+        }
+        *late.borrow_mut() = Rc::downgrade(&this.0);
+        {
+            let on_tab = this.handler(|this, ()| this.left_tab_changed());
+            this.0.code_tab.connect_toggled(move |_| on_tab(()));
+        }
         this.detect_claude();
         this.refresh_layout_menu();
         this.reload(false);
@@ -469,6 +620,13 @@ impl MainWindow {
             .iter()
             .find(|v| v.session.id == id)
             .cloned()
+    }
+
+    /// Aviso que se queda a la vista hasta que el usuario lo cierra.
+    pub fn notice(&self, message: &str) {
+        let toast = adw::Toast::new(message);
+        toast.set_timeout(0);
+        self.0.toasts.add_toast(toast);
     }
 
     fn toast(&self, message: &str) {
@@ -589,7 +747,7 @@ impl MainWindow {
                 MainWindow(inner).take_backend_copy();
                 return;
             }
-            if name.starts_with(limits::LIMITS_MARK) {
+            if name.starts_with(limits::LIMITS_MARK) || name.starts_with(limits::CONTEXT_MARK) {
                 if !temporary {
                     MainWindow(inner).refresh_limits();
                 }
@@ -598,10 +756,16 @@ impl MainWindow {
             if temporary || inner.reload_pending.replace(true) {
                 return;
             }
+            // Varias sesiones trabajando a la vez emiten decenas de eventos
+            // por segundo: se agrupan y además se guarda una distancia mínima
+            // entre recargas, que es lo que cuesta.
+            let since_last = inner.event_reload_at.get().map_or(EVENT_SPACING, |at| at.elapsed());
+            let wait = EVENT_SPACING.saturating_sub(since_last).max(EVENT_DEBOUNCE);
             let weak = Rc::downgrade(&inner);
-            glib::timeout_add_local_once(EVENT_DEBOUNCE, move || {
+            glib::timeout_add_local_once(wait, move || {
                 if let Some(inner) = weak.upgrade() {
                     inner.reload_pending.set(false);
+                    inner.event_reload_at.set(Some(Instant::now()));
                     MainWindow(inner).reload(false);
                 }
             });
@@ -726,6 +890,183 @@ impl MainWindow {
             }
         }
         inner.sidebar.set_extras(&extras);
+        drop(statuses);
+        self.refresh_panel();
+    }
+
+    /// Lleva a la columna derecha las listas que los complementos tienen
+    /// para la sesión a la vista.
+    fn refresh_panel(&self) {
+        let inner = &self.0;
+        if !inner.side_panel.root.is_visible() {
+            return;
+        }
+        let current = self.selected().and_then(|id| self.view(&id));
+        let statuses = inner.plugin_status.borrow();
+        let panels: Vec<plugins::Panel> = current
+            .iter()
+            .flat_map(|view| {
+                inner.plugins.iter().filter_map(|plugin| {
+                    statuses.get(&plugin.id)?.sessions.get(&view.session.id)?.panel.clone()
+                })
+            })
+            .collect();
+        inner.side_panel.set(current.as_ref().map(|view| view.session.name.as_str()), &panels);
+    }
+
+    /// Abre el control de código fuente de la carpeta de una sesión.
+    /// Lleva a la pestaña de código, con el repositorio de una sesión
+    /// desplegado y su primer cambio abierto.
+    fn show_scm(&self, id: &str) {
+        let Some(view) = self.view(id) else { return };
+        let inner = &self.0;
+        inner.left.set_visible(true);
+        *inner.code_expand.borrow_mut() = Some((view.session.cwd.clone(), true));
+        if inner.code_tab.is_active() {
+            self.refresh_code();
+        } else {
+            // Al activarse la pestaña se leen los repositorios.
+            inner.code_tab.set_active(true);
+        }
+    }
+
+    /// Reacciona al cambio de pestaña de la columna izquierda.
+    fn left_tab_changed(&self) {
+        let inner = &self.0;
+        if inner.code_tab.is_active() {
+            inner.left_stack.set_visible_child_name(LEFT_CODE);
+            // Sin otra indicación, se despliega el repositorio de la sesión a la vista.
+            if inner.code_expand.borrow().is_none() {
+                let cwd = self.selected().and_then(|id| self.view(&id)).map(|v| v.session.cwd);
+                *inner.code_expand.borrow_mut() = cwd.map(|cwd| (cwd, false));
+            }
+            self.refresh_code();
+            return;
+        }
+        // De vuelta a las sesiones se cierra la comparación, salvo que haya
+        // cambios sin guardar y el usuario prefiera quedarse.
+        if inner.code_view.is_modified() {
+            inner.code_tab.set_active(true);
+            let weak = self.weak();
+            inner.code_view.guarded(move || {
+                if let Some(inner) = weak.upgrade() {
+                    inner.sessions_tab.set_active(true);
+                }
+            });
+            return;
+        }
+        inner.left_stack.set_visible_child_name(LEFT_SESSIONS);
+        self.close_code();
+    }
+
+    /// Carpetas en las que hay algo abierto: las de los proyectos y las de
+    /// las sesiones sin archivar.
+    fn code_dirs(&self) -> Vec<std::path::PathBuf> {
+        let snapshot = self.0.snapshot.borrow();
+        let mut dirs: Vec<std::path::PathBuf> = snapshot.projects.iter().map(|p| p.path.clone()).collect();
+        dirs.extend(snapshot.sessions.iter().filter(|v| !v.session.archived).map(|v| v.session.cwd.clone()));
+        dirs.sort();
+        dirs.dedup();
+        dirs
+    }
+
+    /// Lee, fuera del hilo de la interfaz, los repositorios de las carpetas
+    /// abiertas y sus cambios.
+    fn refresh_code(&self) {
+        let inner = &self.0;
+        if inner.code_busy.replace(true) {
+            return;
+        }
+        inner.codebar.set_loading(true);
+        let dirs = self.code_dirs();
+        let weak = self.weak();
+        glib::spawn_future_local(async move {
+            let result = gio::spawn_blocking(move || alarviterm_core::scm::discover(&dirs)).await;
+            let Some(inner) = weak.upgrade() else { return };
+            inner.code_busy.set(false);
+            inner.codebar.set_loading(false);
+            let Ok(repos) = result else { return };
+            let this = MainWindow(inner);
+            let inner = &this.0;
+            inner.codebar.set_repos(repos);
+            let changes = inner.codebar.total_changes();
+            inner.code_tab.set_label(&match changes {
+                0 => "Código".to_string(),
+                n => format!("Código  {n}"),
+            });
+            let pending = inner.code_expand.borrow_mut().take();
+            if let Some((dir, open_first)) = pending {
+                if let Some(root) = inner.codebar.repo_of(&dir) {
+                    inner.codebar.expand(&root);
+                    if open_first {
+                        if let Some(change) = inner.codebar.first_change(&root) {
+                            this.open_code(root, change);
+                        }
+                    }
+                }
+            }
+            // El fichero abierto puede haber cambiado en disco entretanto.
+            if let Some((root, path)) = inner.code_view.current() {
+                inner.code_view.reload(inner.codebar.change_for(&root, &path).as_ref());
+            }
+        });
+    }
+
+    /// Relee solo los repositorios desplegados. Es lo que se hace cada pocos
+    /// segundos: leerlos todos, con decenas de árboles de trabajo, es caro.
+    fn refresh_open_code(&self) {
+        let inner = &self.0;
+        let roots = inner.codebar.expanded_roots();
+        if roots.is_empty() || inner.code_busy.replace(true) {
+            return;
+        }
+        let weak = self.weak();
+        glib::spawn_future_local(async move {
+            let result = gio::spawn_blocking(move || alarviterm_core::scm::refresh(&roots)).await;
+            let Some(inner) = weak.upgrade() else { return };
+            inner.code_busy.set(false);
+            let Ok(repos) = result else { return };
+            inner.codebar.update_repos(repos);
+            let changes = inner.codebar.total_changes();
+            inner.code_tab.set_label(&match changes {
+                0 => "Código".to_string(),
+                n => format!("Código  {n}"),
+            });
+            if let Some((root, path)) = inner.code_view.current() {
+                inner.code_view.reload(inner.codebar.change_for(&root, &path).as_ref());
+            }
+        });
+    }
+
+    /// Abre un fichero cambiado en la comparación, que ocupa el sitio de los
+    /// terminales.
+    fn open_code(&self, root: std::path::PathBuf, change: alarviterm_core::scm::Change) {
+        let weak = self.weak();
+        self.0.code_view.guarded(move || {
+            let Some(inner) = weak.upgrade() else { return };
+            inner.code_view.open(&root, &change);
+            inner.center.set_visible_child_name(CENTER_CODE);
+            inner.codebar.select(Some((root.clone(), change.path.clone())));
+        });
+    }
+
+    /// Cierra la comparación y devuelve los terminales.
+    fn close_code(&self) {
+        let inner = &self.0;
+        if inner.center.visible_child_name().as_deref() != Some(CENTER_CODE) {
+            return;
+        }
+        inner.center.set_visible_child_name(CENTER_TERMINALS);
+        inner.codebar.select(None);
+        self.render(true);
+    }
+
+    fn toggle_panel(&self) {
+        let root = &self.0.side_panel.root;
+        root.set_visible(!root.is_visible());
+        let shown = if root.is_visible() { "1" } else { "0" };
+        self.run(|m| m.db().set_setting("ui.panel_visible", shown));
+        self.refresh_panel();
     }
 
     /// Ejecuta una acción de un complemento sobre una sesión y, con su
@@ -799,6 +1140,37 @@ impl MainWindow {
         found
     }
 
+    /// Con el panel del equipo abierto, busca los programas que más consumen.
+    /// Recorrer todos los procesos cuesta unos milisegundos: se hace fuera
+    /// del hilo de la interfaz y solo mientras alguien lo mira.
+    fn refresh_processes(&self) {
+        let inner = &self.0;
+        if !inner.footer.system_panel_open() {
+            inner.process_sample.borrow_mut().take();
+            return;
+        }
+        if inner.process_busy.replace(true) {
+            return;
+        }
+        let weak = self.weak();
+        glib::spawn_future_local(async move {
+            let result = gio::spawn_blocking(sysinfo::process_table).await;
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            inner.process_busy.set(false);
+            let Ok(table) = result else {
+                return;
+            };
+            let now = Instant::now();
+            let previous = inner.process_sample.borrow_mut().take();
+            let before = previous.as_ref().map(|(table, at)| (table, now.duration_since(*at).as_secs_f64()));
+            let top = sysinfo::top_processes(before, &table, super::footer::TOP_PROCESSES);
+            inner.footer.set_processes(&top);
+            *inner.process_sample.borrow_mut() = Some((table, now));
+        });
+    }
+
     /// Mide lo que consume la propia aplicación y lo lleva al pie. La lectura
     /// de `/proc` corre fuera del hilo de la interfaz.
     fn refresh_app_usage(&self) {
@@ -822,15 +1194,34 @@ impl MainWindow {
 
     /// Muestra en el pie los límites de uso que dejó la última línea de
     /// estado de alguna sesión, si el usuario quiere verlos.
+    /// Cuenta del proyecto de la sesión a la vista. Vacía: la predeterminada.
+    fn current_account(&self) -> String {
+        let snapshot = self.0.snapshot.borrow();
+        self.selected()
+            .and_then(|id| snapshot.sessions.iter().find(|v| v.session.id == id))
+            .and_then(|view| view.session.project_id)
+            .and_then(|id| snapshot.projects.iter().find(|p| p.id == id))
+            .map(|project| project.account.clone())
+            .unwrap_or_default()
+    }
+
     fn refresh_limits(&self) {
         let inner = &self.0;
+        // Los de la cuenta de la sesión a la vista: cada proyecto puede
+        // trabajar con una distinta.
+        let account = self.current_account();
         let limits = inner
             .settings
             .borrow()
             .account_limits
-            .then(|| limits::read(&inner.state_dir))
+            .then(|| limits::read(&inner.state_dir, &account))
             .flatten();
-        inner.footer.set_limits(limits.as_ref(), alarviterm_core::now_unix());
+        // Y el contexto que lleva usado esa sesión, que también llega por
+        // la línea de estado.
+        let context = self.selected().and_then(|id| limits::read_context(&inner.state_dir, &id));
+        let alive = self.selected().and_then(|id| self.view(&id)).is_some_and(|v| v.liveness.is_alive());
+        inner.footer.set_context(context.filter(|_| alive).as_ref());
+        inner.footer.set_limits(limits.as_ref(), &account, alarviterm_core::now_unix());
     }
 
     /// Lleva al portapapeles del sistema lo que se acaba de copiar dentro de
@@ -934,15 +1325,20 @@ impl MainWindow {
             inner.footer.set_git(None);
             inner.footer.set_usage(None);
             *inner.details_for.borrow_mut() = current.clone();
+            inner.details_at.set(None);
         }
         let model = target.as_ref().and_then(|v| v.agent.as_ref()).and_then(|a| a.model.as_deref());
         inner.footer.set_model(model);
         let Some(view) = target else {
             return;
         };
+        if inner.details_at.get().is_some_and(|at| at.elapsed() < DETAILS_EVERY) {
+            return;
+        }
         if inner.details_busy.replace(true) {
             return;
         }
+        inner.details_at.set(Some(Instant::now()));
         let id = view.session.id.clone();
         let cwd = view.session.cwd.clone();
         let pid = match view.liveness {
@@ -1113,6 +1509,8 @@ impl MainWindow {
         // 4. Lo que rodea a los paneles.
         let current = layout.active_session().and_then(find);
         inner.footer.set_session(current);
+        self.refresh_limits();
+        self.refresh_panel();
         match current {
             Some(view) => {
                 inner.title.set_title(&view.session.name);
@@ -1162,7 +1560,7 @@ impl MainWindow {
             ChildKind::Terminal
         };
         if desired == ChildKind::Missing {
-            inner.terminals.borrow_mut().remove(id);
+            self.forget_terminal(id);
             inner.detached.borrow_mut().remove(id);
         }
         if view.child_kind(id) == Some(desired) {
@@ -1202,14 +1600,23 @@ impl MainWindow {
             .profile(session.session.profile.as_deref())
             .clone();
         let terminal = terminal::spawn(&attach, &cwd, &profile, move |t| on_exit(t.clone()));
-        self.0.terminals.borrow_mut().insert(id, terminal.clone());
+        let replaced = self.0.terminals.borrow_mut().insert(id, terminal.clone());
+        // Se suelta ya sin la tabla prestada, igual que en `forget_terminal`.
+        drop(replaced);
         Some(terminal)
+    }
+
+    /// Saca un terminal de la tabla. Al destruirse, VTE puede avisar en ese
+    /// mismo instante de que su proceso terminó, y ese aviso consulta la
+    /// tabla: por eso el terminal se suelta con la tabla ya devuelta.
+    fn forget_terminal(&self, id: &str) -> bool {
+        let removed = self.0.terminals.borrow_mut().remove(id);
+        removed.is_some()
     }
 
     /// Retira el terminal de una sesión, esté en el panel que esté.
     fn drop_terminal(&self, id: &str) {
-        let removed = self.0.terminals.borrow_mut().remove(id);
-        if removed.is_some() {
+        if self.forget_terminal(id) {
             let views: Vec<Rc<PaneView>> = self.0.views.borrow().values().cloned().collect();
             for view in views {
                 if view.child_kind(id) == Some(ChildKind::Terminal) {
@@ -1221,7 +1628,9 @@ impl MainWindow {
 
     fn terminal_exited(&self, id: &str, terminal: &vte::Terminal) {
         // Un terminal ya retirado (reinicio, borrado) no debe alterar nada.
-        if self.0.terminals.borrow().get(id) != Some(terminal) {
+        let current = self.0.terminals.try_borrow().map(|table| table.get(id) == Some(terminal));
+        // Con la tabla en plena modificación, quien la modifica ya se ocupa.
+        if !matches!(current, Ok(true)) {
             return;
         }
         self.drop_terminal(id);
@@ -1474,6 +1883,7 @@ impl MainWindow {
             env: Vec::new(),
             // El terminal nace en el mismo proyecto, con su entorno.
             project_id: current.and_then(|v| v.session.project_id),
+            resume: None,
         };
         if let Some(session) = self.run(|m| m.create_session(new)) {
             self.reload(false);
@@ -1533,7 +1943,8 @@ impl MainWindow {
         self.add_action("command-palette", |this| this.show_palette());
         self.add_action("shortcuts", |this| this.show_shortcuts());
         self.add_action("search-sessions", |this| {
-            this.0.sidebar.root.set_visible(true);
+            this.0.left.set_visible(true);
+            this.0.sessions_tab.set_active(true);
             this.0.sidebar.toggle_search();
         });
         self.add_action("focus-terminal", |this| this.render(true));
@@ -1566,6 +1977,13 @@ impl MainWindow {
         self.add_target_action("session-open", |this, id| this.open_session(id));
         self.add_action("settings", |this| this.show_settings());
         self.add_action("stats", |this| this.show_stats());
+        self.add_action("toggle-panel", |this| this.toggle_panel());
+        self.add_action("scm", |this| {
+            if let Some(id) = this.selected() {
+                this.show_scm(&id);
+            }
+        });
+        self.add_target_action("session-scm", |this, id| this.show_scm(id));
         self.add_action("projects", |this| this.show_projects());
         self.add_action("current-archive", |this| match this.selected() {
             Some(id) => this.set_archived(&id, true),
@@ -1598,6 +2016,11 @@ impl MainWindow {
         self.add_target_action("project-new-session", |this, project| {
             this.new_session_in(None, project.parse().ok());
         });
+        self.add_target_action("project-import", |this, project| {
+            if let Ok(id) = project.parse() {
+                this.import_conversations(id);
+            }
+        });
         self.add_target_action("project-new-terminal", |this, project| {
             if let Ok(id) = project.parse() {
                 this.new_project_terminal(id);
@@ -1608,7 +2031,8 @@ impl MainWindow {
             this.apply_settings();
         });
         self.add_target_action("sidebar-filter", |this, name| {
-            this.0.sidebar.root.set_visible(true);
+            this.0.left.set_visible(true);
+            this.0.sessions_tab.set_active(true);
             this.0.sidebar.set_status_filter(StatusFilter::parse(name));
         });
 
@@ -1681,6 +2105,27 @@ impl MainWindow {
                 });
             }
         });
+        // Destino con la forma «cuáles|sesión»: others, left o right.
+        self.add_target_action("tab-close-many", |this, target| {
+            let Some((which, session)) = target.split_once('|') else {
+                return;
+            };
+            if let Some(which) = alarviterm_core::layout::CloseTabs::parse(which) {
+                this.edit_layout(true, |layout| {
+                    layout.close_tabs(session, which);
+                });
+            }
+        });
+        // Destino con la forma «sesión|destino|lado»: before o after.
+        self.add_target_action("tab-move", |this, target| {
+            let mut parts = target.split('|');
+            let (Some(session), Some(anchor), Some(side)) = (parts.next(), parts.next(), parts.next()) else {
+                return;
+            };
+            this.edit_layout(true, |layout| {
+                layout.move_tab(session, anchor, side == "after");
+            });
+        });
         self.add_target_action("tab-close", |this, session| {
             this.edit_layout(true, |layout| {
                 layout.close_tab(session);
@@ -1726,6 +2171,23 @@ impl MainWindow {
             }
         });
 
+        type Pick = fn(i64) -> Batch;
+        let batches: [(&str, Pick, bool); 4] = [
+            ("group-start", Batch::Group, true),
+            ("group-stop", Batch::Group, false),
+            ("project-start", Batch::Project, true),
+            ("project-stop", Batch::Project, false),
+        ];
+        for (name, pick, start) in batches {
+            self.add_target_action(name, move |this, target| {
+                let Ok(id) = target.parse::<i64>() else { return };
+                if start {
+                    this.start_sessions(pick(id));
+                } else {
+                    this.stop_sessions(pick(id));
+                }
+            });
+        }
         self.add_target_action("group-new-session", |this, group| {
             this.new_session_dialog(group.parse().ok())
         });
@@ -1896,6 +2358,9 @@ impl MainWindow {
             for (title, action) in [
                 ("Nueva sesión en el proyecto", "project-new-session"),
                 ("Nuevo terminal en el proyecto", "project-new-terminal"),
+                ("Añadir conversaciones existentes al proyecto", "project-import"),
+                ("Encender las sesiones del proyecto", "project-start"),
+                ("Apagar las sesiones del proyecto", "project-stop"),
             ] {
                 commands.push(Command {
                     title: format!("{title} {}", project.name),
@@ -1973,7 +2438,15 @@ impl MainWindow {
             return;
         };
         let cache = Paths::at(data_dir.to_path_buf()).stats_cache();
-        let dialog = stats::show(&inner.window, inner.stats_library.clone(), cache);
+        // Carpetas de cada cuenta con nombre, según los proyectos.
+        let mut accounts: Vec<(String, Vec<std::path::PathBuf>)> = Vec::new();
+        for project in inner.snapshot.borrow().projects.iter().filter(|p| !p.account.is_empty()) {
+            match accounts.iter_mut().find(|(name, _)| name.eq_ignore_ascii_case(&project.account)) {
+                Some((_, folders)) => folders.push(project.path.clone()),
+                None => accounts.push((project.account.clone(), vec![project.path.clone()])),
+            }
+        }
+        let dialog = stats::show(&inner.window, inner.stats_library.clone(), cache, accounts);
         self.refocus_after(&dialog);
     }
 
@@ -2020,7 +2493,7 @@ impl MainWindow {
         // límites. Las que ya corren conservan lo que tenían al arrancar.
         if let (Some(hook), Some(data_dir)) = (monitor::find_hook_binary(), inner.state_dir.parent()) {
             let file = Paths::at(data_dir.to_path_buf()).hook_settings();
-            match monitor::hook_settings(&hook, settings.account_limits) {
+            match monitor::hook_settings(&hook, settings.statusline(), Some(&settings.claude_theme)) {
                 Ok(text) => {
                     if let Err(e) = std::fs::write(&file, text) {
                         self.toast(&format!("No se pudieron guardar los ajustes de hooks: {e}"));
@@ -2076,6 +2549,15 @@ impl MainWindow {
             edit: Box::new(self.handler(|this, id: i64| this.edit_project(Some(id)))),
             delete: Box::new(self.handler(|this, id: i64| this.delete_project(id))),
             launch: Box::new(self.handler(|this, id: i64| this.new_session_in(None, Some(id)))),
+            import: Box::new(self.handler(|this, id: i64| this.import_conversations(id))),
+            power: Box::new(self.handler(|this, id: i64| {
+                let which = Batch::Project(id);
+                if this.batch(which).1.iter().any(|v| v.liveness.is_alive()) {
+                    this.stop_sessions(which);
+                } else {
+                    this.start_sessions(which);
+                }
+            })),
         };
         let dialog = projects::manager(&self.0.window, &projects, callbacks);
         self.refocus_after(&dialog);
@@ -2163,6 +2645,7 @@ impl MainWindow {
             extra_args: String::new(),
             env: Vec::new(),
             project_id: Some(project.id),
+            resume: None,
         };
         if let Some(session) = self.run(|m| m.create_session(new)) {
             self.reload(false);
@@ -2179,7 +2662,8 @@ impl MainWindow {
                 snapshot
                     .sessions
                     .iter()
-                    .filter(move |v| v.agent.as_ref().is_some_and(|a| a.phase == phase))
+                    // Quien tiene trabajo en segundo plano no espera al usuario.
+                    .filter(move |v| v.agent.as_ref().is_some_and(|a| a.phase == phase && !a.busy_in_background()))
                     .map(|v| v.session.id.clone())
             };
             with(Phase::Permission).chain(with(Phase::Waiting)).collect()
@@ -2294,6 +2778,9 @@ impl MainWindow {
         let on_active = self.handler(|this, active: bool| {
             if active {
                 this.reload(false);
+                if this.0.code_tab.is_active() {
+                    this.refresh_open_code();
+                }
             }
         });
         inner
@@ -2308,11 +2795,29 @@ impl MainWindow {
             // La cuenta atrás de los límites avanza aunque nada cambie.
             MainWindow(inner.clone()).refresh_limits();
             MainWindow(inner.clone()).refresh_app_usage();
+            // Con la pestaña de código a la vista, sus cambios se mantienen al día.
+            if inner.window.is_active() && inner.code_tab.is_active() && inner.left.is_visible() {
+                MainWindow(inner.clone()).refresh_open_code();
+            }
             if inner.window.is_active() {
                 MainWindow(inner).reload(false);
             }
             glib::ControlFlow::Continue
         });
+
+        // Consumo del equipo: una lectura de /proc cada pocos segundos.
+        let weak = self.weak();
+        let sample_system = move || {
+            let Some(inner) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let wanted = inner.settings.borrow().footer_usage;
+            inner.footer.set_system(wanted.then(sysinfo::system_sample).flatten());
+            MainWindow(inner).refresh_processes();
+            glib::ControlFlow::Continue
+        };
+        sample_system();
+        glib::timeout_add_seconds_local(SYSTEM_SECONDS, sample_system);
 
         let weak = self.weak();
         let check_every = hidden_terminal_ttl().as_secs().clamp(1, 30) as u32;
@@ -2337,14 +2842,14 @@ impl MainWindow {
             self.save_setting(KEY_WINDOW_WIDTH, &inner.window.width().to_string());
             self.save_setting(KEY_WINDOW_HEIGHT, &inner.window.height().to_string());
         }
-        if inner.sidebar.root.is_visible() {
+        if inner.left.is_visible() {
             self.save_setting(KEY_SIDEBAR_WIDTH, &inner.paned.position().to_string());
         }
         // Las proporciones de los separadores cambian sin pasar por `render`.
         self.save_setting(KEY_LAYOUT, &inner.layout.borrow().to_json());
         self.save_setting(
             KEY_SIDEBAR_VISIBLE,
-            if inner.sidebar.root.is_visible() { "1" } else { "0" },
+            if inner.left.is_visible() { "1" } else { "0" },
         );
     }
 
@@ -2407,7 +2912,7 @@ impl MainWindow {
     }
 
     fn toggle_sidebar(&self) {
-        let root = &self.0.sidebar.root;
+        let root = &self.0.left;
         root.set_visible(!root.is_visible());
         if !root.is_visible() {
             self.render(true);
@@ -2486,6 +2991,10 @@ impl MainWindow {
                     edit.append_submenu(Some("Mover a"), &groups);
                 }
                 menu.append_section(None, &edit);
+
+                let code = gio::Menu::new();
+                code.append_item(&sidebar::menu_item("Control de código fuente", "win.session-scm", &id));
+                menu.append_section(None, &code);
 
                 let process = gio::Menu::new();
                 let restart = if view.liveness == Liveness::Missing {
@@ -2583,6 +3092,8 @@ impl MainWindow {
                     "win.group-new-session",
                     &target,
                 ));
+                menu.append_item(&sidebar::menu_item("Encender las sesiones del grupo", "win.group-start", &target));
+                menu.append_item(&sidebar::menu_item("Apagar las sesiones del grupo", "win.group-stop", &target));
                 menu.append_item(&sidebar::menu_item("Renombrar grupo", "win.group-rename", &target));
                 menu.append_item(&sidebar::menu_item("Subir grupo", "win.group-up", &target));
                 menu.append_item(&sidebar::menu_item("Bajar grupo", "win.group-down", &target));
@@ -2613,6 +3124,7 @@ impl MainWindow {
             projects: self.0.snapshot.borrow().projects.clone(),
             project_id,
             model: self.0.settings.borrow().default_model.clone(),
+            extra_args: self.0.settings.borrow().default_args.clone(),
             shell: false,
         };
         let weak = self.weak();
@@ -2628,6 +3140,97 @@ impl MainWindow {
             Ok(())
         });
         self.refocus_after(&dialog);
+    }
+
+    /// Ofrece las conversaciones de Claude Code guardadas en la carpeta de un
+    /// proyecto para reanudarlas como sesiones suyas.
+    fn import_conversations(&self, project_id: i64) {
+        let Some(project) = self.0.snapshot.borrow().projects.iter().find(|p| p.id == project_id).cloned()
+        else {
+            return;
+        };
+        let Some(config) = limits::claude_config_dir() else {
+            return;
+        };
+        let here: HashSet<String> = self
+            .0
+            .snapshot
+            .borrow()
+            .sessions
+            .iter()
+            .filter_map(|v| v.agent.as_ref().and_then(|a| a.conversation.clone()))
+            .collect();
+        let weak = self.weak();
+        glib::spawn_future_local(async move {
+            let path = project.path.clone();
+            let read = gio::spawn_blocking(move || {
+                (conversations::list(&config, &path), conversations::open_now(&config))
+            })
+            .await;
+            let (Some(inner), Ok((found, open))) = (weak.upgrade(), read) else {
+                return;
+            };
+            let this = MainWindow(inner);
+            let found = found
+                .into_iter()
+                .map(|c| {
+                    let blocked = if here.contains(&c.id) {
+                        Some(dialogs::Blocked::AlreadyHere)
+                    } else if open.contains_key(&c.id) {
+                        Some(dialogs::Blocked::OpenElsewhere)
+                    } else {
+                        None
+                    };
+                    (c, blocked)
+                })
+                .collect();
+            let on_import = {
+                let project = project.clone();
+                this.handler(move |this, chosen: Vec<(String, String)>| {
+                    this.add_conversations(&project, chosen);
+                })
+            };
+            let dialog = dialogs::import_conversations(
+                &this.0.window,
+                &projects::label(&project),
+                found,
+                alarviterm_core::now_unix(),
+                on_import,
+            );
+            this.refocus_after(&dialog);
+        });
+    }
+
+    fn add_conversations(&self, project: &alarviterm_core::model::Project, chosen: Vec<(String, String)>) {
+        let extra_args = self.0.settings.borrow().default_args.clone();
+        let model = Some(self.0.settings.borrow().default_model.clone());
+        // Entre la lista y la pulsación puede haberse abierto en otro sitio.
+        let open = limits::claude_config_dir().map(|c| conversations::open_now(&c)).unwrap_or_default();
+        let mut first = None;
+        for (conversation, name) in chosen {
+            if open.contains_key(&conversation) {
+                self.toast(&format!("{name} está abierta en otro terminal, no se añade"));
+                continue;
+            }
+            let new = NewSession {
+                name,
+                group_id: None,
+                kind: SessionKind::Claude,
+                cwd: project.path.clone(),
+                model: model.clone(),
+                extra_args: extra_args.clone(),
+                env: Vec::new(),
+                project_id: Some(project.id),
+                resume: Some(conversation),
+            };
+            if let Some(session) = self.run(|m| m.create_session(new)) {
+                first.get_or_insert(session.id);
+            }
+        }
+        self.reload(false);
+        if let Some(id) = first {
+            self.open_session(&id);
+        }
     }
 
     fn new_group_dialog(&self) {
@@ -2719,6 +3322,85 @@ impl MainWindow {
         } else {
             restart(());
         }
+    }
+
+    /// Sesiones sin archivar de un grupo o de un proyecto, y su nombre.
+    fn batch(&self, which: Batch) -> (String, Vec<SessionView>) {
+        let snapshot = self.0.snapshot.borrow();
+        let name = match which {
+            Batch::Group(id) => snapshot.groups.iter().find(|g| g.id == id).map(|g| g.name.clone()),
+            Batch::Project(id) => snapshot.projects.iter().find(|p| p.id == id).map(|p| p.name.clone()),
+        };
+        let sessions = snapshot
+            .sessions
+            .iter()
+            .filter(|v| !v.session.archived)
+            .filter(|v| match which {
+                Batch::Group(id) => v.session.group_id == Some(id),
+                Batch::Project(id) => v.session.project_id == Some(id),
+            })
+            .cloned()
+            .collect();
+        (name.unwrap_or_default(), sessions)
+    }
+
+    /// Arranca las sesiones paradas de un grupo o de un proyecto. Las de
+    /// Claude Code retoman cada una su conversación.
+    fn start_sessions(&self, which: Batch) {
+        let (name, sessions) = self.batch(which);
+        let stopped: Vec<SessionView> = sessions.into_iter().filter(|v| !v.liveness.is_alive()).collect();
+        if stopped.is_empty() {
+            self.toast(&format!("{name} no tiene sesiones paradas"));
+            return;
+        }
+        let mut started = 0;
+        for view in &stopped {
+            let id = &view.session.id;
+            self.drop_terminal(id);
+            self.0.detached.borrow_mut().remove(id);
+            if self.run(|m| m.relaunch(id, Resume::ContinueLatest)).is_some() {
+                started += 1;
+            }
+        }
+        self.reload(false);
+        let plural = if started == 1 { "sesión encendida" } else { "sesiones encendidas" };
+        self.0.toasts.add_toast(adw::Toast::new(&format!("{name}: {started} {plural}")));
+    }
+
+    /// Detiene las sesiones en marcha de un grupo o de un proyecto. Siguen en
+    /// la lista y se arrancan después con su conversación.
+    fn stop_sessions(&self, which: Batch) {
+        let (name, sessions) = self.batch(which);
+        let running: Vec<String> = sessions
+            .into_iter()
+            .filter(|v| v.liveness.is_alive())
+            .map(|v| v.session.id)
+            .collect();
+        if running.is_empty() {
+            self.toast(&format!("{name} no tiene sesiones en marcha"));
+            return;
+        }
+        let count = running.len();
+        let stop = self.handler(move |this, ()| {
+            for id in &running {
+                this.drop_terminal(id);
+                this.run(|m| m.stop(id));
+            }
+            this.reload(false);
+        });
+        let body = format!(
+            "Se terminarán {count} procesos y lo que esté a medias en ellos se interrumpe. Las sesiones siguen \
+             en la lista y al arrancarlas retoman su conversación."
+        );
+        let dialog = dialogs::confirm(
+            &self.0.window,
+            &format!("Apagar las sesiones de {name}"),
+            &body,
+            "Apagar todas",
+            true,
+            move || stop(()),
+        );
+        self.refocus_after(&dialog);
     }
 
     fn stop_session(&self, id: &str) {

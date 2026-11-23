@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, gio, glib};
 use alarviterm_core::layout::{Node, NodeId, Orientation};
 
 use super::dnd::{self, SessionRef};
@@ -246,6 +246,10 @@ impl PaneView {
                 (gdk::BUTTON_MIDDLE, _) => ("win.tab-close", session.clone()),
                 (gdk::BUTTON_PRIMARY, 2) => ("win.pane-maximize", pane.to_string()),
                 (gdk::BUTTON_PRIMARY, _) => ("win.tab-select", format!("{pane}|{session}")),
+                (gdk::BUTTON_SECONDARY, _) => {
+                    tab_menu(&widget, &session);
+                    return;
+                }
                 _ => return,
             };
             if let Err(e) = widget.activate_action(action, Some(&target.to_variant())) {
@@ -254,6 +258,41 @@ impl PaneView {
         });
         widget.add_controller(click);
         dnd::make_draggable(&widget, &tab.session_id);
+
+        // Soltar otra pestaña encima la coloca a este lado o al otro, según
+        // en qué mitad caiga. Así se reordenan y se pasan entre paneles.
+        let drop = gtk::DropTarget::new(SessionRef::static_type(), gdk::DragAction::MOVE);
+        let side = |widget: &gtk::Widget, x: f64| if x > f64::from(widget.width()) / 2.0 { "after" } else { "before" };
+        let mark = move |target: &gtk::DropTarget, x: f64| {
+            if let Some(widget) = target.widget() {
+                let after = side(&widget, x) == "after";
+                set_class(&widget, "drop-after", after);
+                set_class(&widget, "drop-before", !after);
+            }
+            gdk::DragAction::MOVE
+        };
+        drop.connect_enter(move |target, x, _| mark(target, x));
+        drop.connect_motion(move |target, x, _| mark(target, x));
+        drop.connect_leave(|target| {
+            if let Some(widget) = target.widget() {
+                widget.remove_css_class("drop-after");
+                widget.remove_css_class("drop-before");
+            }
+        });
+        let anchor = tab.session_id.clone();
+        drop.connect_drop(move |target, value, x, _| {
+            let (Some(widget), Ok(dragged)) = (target.widget(), value.get::<SessionRef>()) else {
+                return false;
+            };
+            widget.remove_css_class("drop-after");
+            widget.remove_css_class("drop-before");
+            if dragged.0 == anchor {
+                return false;
+            }
+            let destination = format!("{}|{anchor}|{}", dragged.0, side(&widget, x));
+            widget.activate_action("win.tab-move", Some(&destination.to_variant())).is_ok()
+        });
+        widget.add_controller(drop);
         widget
     }
 
@@ -325,6 +364,38 @@ impl PaneView {
         self.maximize.set_visible(!alone || maximized);
         self.close.set_visible(!alone);
     }
+}
+
+/// Menú contextual de una pestaña.
+fn tab_menu(tab: &gtk::Widget, session: &str) {
+    let menu = gio::Menu::new();
+    let item = |label: &str, action: &str, target: &str| {
+        let item = gio::MenuItem::new(Some(label), None);
+        item.set_action_and_target_value(Some(action), Some(&target.to_variant()));
+        item
+    };
+    menu.append_item(&item("Cerrar esta pestaña", "win.tab-close", session));
+    let many = gio::Menu::new();
+    for (label, which) in [
+        ("Cerrar las demás", "others"),
+        ("Cerrar las de la derecha", "right"),
+        ("Cerrar las de la izquierda", "left"),
+    ] {
+        many.append_item(&item(label, "win.tab-close-many", &format!("{which}|{session}")));
+    }
+    menu.append_section(None, &many);
+
+    let popover = gtk::PopoverMenu::from_model(Some(&menu));
+    popover.set_parent(tab);
+    popover.set_has_arrow(false);
+    popover.set_position(gtk::PositionType::Bottom);
+    // La pestaña se vuelve a crear en cada redibujo: el menú no debe quedarse
+    // colgado de una que ya no existe.
+    popover.connect_closed(|popover| {
+        let popover = popover.clone();
+        glib::idle_add_local_once(move || popover.unparent());
+    });
+    popover.popup();
 }
 
 fn set_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {

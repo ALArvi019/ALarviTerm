@@ -21,6 +21,7 @@ pub const STATUS_CLASSES: &[&str] = &[
     "st-alive",
     "st-working",
     "st-waiting",
+    "st-background",
     "st-attention",
     "st-done",
     "st-error",
@@ -64,7 +65,84 @@ pub fn describe(view: &SessionView) -> StatusInfo {
     }
 }
 
+/// Estado de un conjunto de sesiones en una sola señal, para la cabecera de
+/// un grupo plegado. Manda lo que necesita al usuario: primero quien pide
+/// permiso, después quien espera respuesta, después quien trabaja.
+pub fn summarize<'a>(views: impl Iterator<Item = &'a SessionView>) -> Option<StatusInfo> {
+    const ORDER: [&str; 8] = [
+        "st-attention",
+        "st-waiting",
+        "st-working",
+        "st-background",
+        "st-alive",
+        "st-error",
+        "st-done",
+        "st-missing",
+    ];
+    let mut counts = [0usize; 8];
+    for view in views {
+        let class = describe(view).class;
+        if let Some(index) = ORDER.iter().position(|c| *c == class) {
+            counts[index] += 1;
+        }
+    }
+    let total: usize = counts.iter().sum();
+    let first = counts.iter().position(|n| *n > 0)?;
+    let n = counts[first];
+    let one = n == 1;
+    let label = match first {
+        0 if one => "1 pide permiso".to_string(),
+        0 => format!("{n} piden permiso"),
+        1 if one => "1 te espera".to_string(),
+        1 => format!("{n} te esperan"),
+        2 if one => "1 trabajando".to_string(),
+        2 => format!("{n} trabajando"),
+        3 => format!("{n} en segundo plano"),
+        4 if one => "1 activa".to_string(),
+        4 => format!("{n} activas"),
+        5 if one => "1 con error".to_string(),
+        5 => format!("{n} con error"),
+        _ => "paradas".to_string(),
+    };
+    let parts: Vec<String> = [
+        (0, "piden permiso"),
+        (1, "esperan tu respuesta"),
+        (2, "trabajando"),
+        (3, "con trabajo en segundo plano"),
+        (4, "activas sin estado"),
+        (5, "con error"),
+        (6, "terminadas"),
+        (7, "paradas"),
+    ]
+    .iter()
+    .filter(|(index, _)| counts[*index] > 0)
+    .map(|(index, what)| format!("{} {what}", counts[*index]))
+    .collect();
+    Some(StatusInfo {
+        label,
+        class: ORDER[first],
+        tooltip: format!("{total} sesiones: {}", parts.join(", ")),
+    })
+}
+
 fn describe_agent(agent: &AgentState) -> StatusInfo {
+    // Con el turno terminado pero algo corriendo por su cuenta, la sesión no
+    // espera al usuario: espera a que eso acabe.
+    if agent.busy_in_background() {
+        let label = match (agent.background_shell, agent.subagents) {
+            (true, 0) => "Comando en segundo plano".to_string(),
+            (false, 1) => "Subagente en segundo plano".to_string(),
+            (false, n) => format!("{n} subagentes en segundo plano"),
+            (true, _) => "Comando y subagentes en segundo plano".to_string(),
+        };
+        return StatusInfo {
+            label,
+            class: "st-background",
+            tooltip: "Claude Code ha terminado su turno, pero dejó trabajo en marcha y seguirá cuando acabe. \
+                      No espera nada de ti. Puedes escribirle igualmente."
+                .to_string(),
+        };
+    }
     let (label, class, what) = match agent.phase {
         Phase::Ready => (
             "Lista".to_string(),
@@ -133,6 +211,8 @@ pub fn attention_message(before: Option<Phase>, agent: &AgentState) -> Option<St
             Some(tool) => format!("Pide permiso para usar {tool}"),
             None => "Pide permiso para continuar".to_string(),
         }),
+        // Con un comando o un subagente todavía en marcha no espera a nadie.
+        Phase::Waiting if agent.busy_in_background() => None,
         // Solo avisa de un turno terminado, no de una sesión recién abierta.
         Phase::Waiting if matches!(before, Some(Phase::Working | Phase::Compacting | Phase::Permission)) => {
             Some("Ha terminado y espera tu respuesta".to_string())
@@ -213,6 +293,8 @@ mod tests {
             permission_mode: None,
             model: None,
             launch: None,
+            subagents: 0,
+            background_shell: false,
         }
     }
 
@@ -247,6 +329,48 @@ mod tests {
     }
 
     #[test]
+    fn a_group_shows_first_whoever_needs_the_user() {
+        let claude = |phase| view(SessionKind::Claude, ALIVE, Some(agent(phase, None)));
+        let stopped = || view(SessionKind::Claude, Liveness::Missing, None);
+
+        let all = [claude(Phase::Working), claude(Phase::Waiting), claude(Phase::Permission), stopped()];
+        let top = summarize(all.iter()).expect("resumen");
+        assert_eq!((top.class, top.label.as_str()), ("st-attention", "1 pide permiso"));
+        assert!(top.tooltip.starts_with("4 sesiones"));
+
+        let waiting = [claude(Phase::Working), claude(Phase::Waiting), claude(Phase::Waiting)];
+        let top = summarize(waiting.iter()).expect("resumen");
+        assert_eq!((top.class, top.label.as_str()), ("st-waiting", "2 te esperan"));
+
+        // Quien dejó un comando o un subagente corriendo no espera al usuario.
+        let background = |shell: bool, subagents: u32| {
+            let mut state = agent(Phase::Waiting, None);
+            state.background_shell = shell;
+            state.subagents = subagents;
+            view(SessionKind::Claude, ALIVE, Some(state))
+        };
+        let shell = describe(&background(true, 0));
+        assert_eq!((shell.class, shell.label.as_str()), ("st-background", "Comando en segundo plano"));
+        assert_eq!(describe(&background(false, 2)).label, "2 subagentes en segundo plano");
+        let quiet = [background(true, 0), background(false, 1), stopped()];
+        let top = summarize(quiet.iter()).expect("resumen");
+        assert_eq!((top.class, top.label.as_str()), ("st-background", "2 en segundo plano"));
+        let mixed = [background(true, 0), claude(Phase::Waiting)];
+        assert_eq!(summarize(mixed.iter()).expect("resumen").label, "1 te espera");
+        // Un subagente en marcha durante el turno no cambia nada: está trabajando.
+        let mut working = agent(Phase::Working, None);
+        working.subagents = 1;
+        assert_eq!(describe(&view(SessionKind::Claude, ALIVE, Some(working))).class, "st-working");
+
+        let busy = [claude(Phase::Working), stopped()];
+        assert_eq!(summarize(busy.iter()).expect("resumen").label, "1 trabajando");
+        let off = [stopped(), stopped()];
+        let top = summarize(off.iter()).expect("resumen");
+        assert_eq!((top.class, top.label.as_str()), ("st-missing", "paradas"));
+        assert!(summarize(std::iter::empty()).is_none());
+    }
+
+    #[test]
     fn attention_only_on_transitions_that_need_the_user() {
         let ask = agent(Phase::Permission, Some("Bash"));
         assert!(attention_message(Some(Phase::Working), &ask).is_some());
@@ -254,6 +378,9 @@ mod tests {
         let waiting = agent(Phase::Waiting, None);
         assert!(attention_message(Some(Phase::Working), &waiting).is_some());
         assert!(attention_message(Some(Phase::Ready), &waiting).is_none());
+        let mut background = agent(Phase::Waiting, None);
+        background.background_shell = true;
+        assert!(attention_message(Some(Phase::Working), &background).is_none());
         assert!(attention_message(None, &waiting).is_none());
         assert!(attention_message(Some(Phase::Waiting), &agent(Phase::Working, None)).is_none());
     }

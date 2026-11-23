@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::gio;
+use alarviterm_core::claude::conversations::Conversation;
 use alarviterm_core::model::{parse_env_assignments, Group, NewSession, Project, SessionKind};
 use alarviterm_core::paths::{display_path, expand_tilde};
 
@@ -84,6 +85,8 @@ pub struct NewSessionDefaults {
     pub project_id: Option<i64>,
     /// Modelo que se propone, tomado de los ajustes.
     pub model: String,
+    /// Argumentos adicionales que se proponen, tomados de los ajustes.
+    pub extra_args: String,
     /// Si la sesión propuesta es un shell y no Claude Code.
     pub shell: bool,
 }
@@ -158,6 +161,7 @@ pub fn new_session(
         .build();
     model.set_text(&defaults.model);
     let extra_args = adw::EntryRow::builder().title("Argumentos adicionales").build();
+    extra_args.set_text(&defaults.extra_args);
     let env = adw::EntryRow::builder()
         .title("Variables de entorno (CLAVE=valor ...)")
         .build();
@@ -301,6 +305,7 @@ pub fn new_session(
                             .checked_sub(1)
                             .and_then(|i| projects.get(i))
                             .map(|p| p.id),
+                        resume: None,
                     })
                 });
             match result {
@@ -328,3 +333,137 @@ pub fn new_session(
     dialog
 }
 
+
+/// Por qué una conversación no se puede traer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Blocked {
+    /// Otro Claude Code la tiene abierta ahora mismo.
+    OpenElsewhere,
+    /// Ya es una sesión de ALarviTerm.
+    AlreadyHere,
+}
+
+/// Conversaciones de Claude Code que ya existen en la carpeta de un proyecto,
+/// para elegir cuáles pasan a ser sesiones. `on_import` recibe las elegidas
+/// con el nombre que tendrá cada sesión.
+pub fn import_conversations(
+    parent: &impl IsA<gtk::Widget>,
+    project: &str,
+    found: Vec<(Conversation, Option<Blocked>)>,
+    now: i64,
+    on_import: impl Fn(Vec<(String, String)>) + 'static,
+) -> adw::Dialog {
+    let dialog = adw::Dialog::builder()
+        .title("Añadir conversaciones existentes")
+        .content_width(620)
+        .content_height(560)
+        .build();
+
+    let group = adw::PreferencesGroup::new();
+    group.set_description(Some(&format!(
+        "Conversaciones de Claude Code guardadas en la carpeta de {project}. Las que elijas se \
+         reanudan como sesiones del proyecto, con su historial. Una conversación abierta en otro \
+         terminal hay que cerrarla allí antes."
+    )));
+    let import = gtk::Button::with_label("Añadir");
+    import.add_css_class("suggested-action");
+    import.set_sensitive(false);
+
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Filtrar por nombre"));
+    search.set_visible(found.len() > 8);
+    let mut rows: Vec<(adw::ActionRow, String)> = Vec::new();
+    let mut checks: Vec<(gtk::CheckButton, String, String)> = Vec::new();
+    for (conversation, blocked) in &found {
+        let short: String = conversation.id.chars().take(8).collect();
+        let name = conversation.title.clone().unwrap_or_else(|| format!("Conversación {short}"));
+        let mut details = vec![ago(now - conversation.modified), size_text(conversation.size)];
+        match blocked {
+            Some(Blocked::OpenElsewhere) => details.push("abierta en otro terminal".into()),
+            Some(Blocked::AlreadyHere) => details.push("ya es una sesión de ALarviTerm".into()),
+            None => {}
+        }
+        let row = adw::ActionRow::builder()
+            .title(gtk::glib::markup_escape_text(&name))
+            .subtitle(details.join("  ·  "))
+            .build();
+        let check = gtk::CheckButton::new();
+        check.set_valign(gtk::Align::Center);
+        row.add_prefix(&check);
+        if blocked.is_some() {
+            row.set_sensitive(false);
+        } else {
+            row.set_activatable_widget(Some(&check));
+            checks.push((check, conversation.id.clone(), name.clone()));
+        }
+        group.add(&row);
+        rows.push((row, name.to_lowercase()));
+    }
+    search.connect_search_changed(move |entry| {
+        let wanted = entry.text().trim().to_lowercase();
+        for (row, name) in &rows {
+            row.set_visible(wanted.is_empty() || name.contains(&wanted));
+        }
+    });
+    if found.is_empty() {
+        let empty = adw::ActionRow::builder()
+            .title("No hay conversaciones guardadas en esta carpeta")
+            .build();
+        empty.add_css_class("dim-label");
+        group.add(&empty);
+    }
+
+    let checks = Rc::new(checks);
+    for (check, _, _) in checks.iter() {
+        let (checks, import) = (checks.clone(), import.clone());
+        check.connect_toggled(move |_| {
+            let chosen = checks.iter().filter(|(c, _, _)| c.is_active()).count();
+            import.set_sensitive(chosen > 0);
+            import.set_label(&if chosen > 1 { format!("Añadir {chosen}") } else { "Añadir".to_string() });
+        });
+    }
+    {
+        let (checks, dialog) = (checks.clone(), dialog.clone());
+        import.connect_clicked(move |_| {
+            let chosen: Vec<(String, String)> = checks
+                .iter()
+                .filter(|(c, _, _)| c.is_active())
+                .map(|(_, id, name)| (id.clone(), name.clone()))
+                .collect();
+            dialog.close();
+            on_import(chosen);
+        });
+    }
+
+    let page = adw::PreferencesPage::new();
+    page.add(&group);
+    let header = adw::HeaderBar::new();
+    header.pack_end(&import);
+    let view = adw::ToolbarView::new();
+    view.add_top_bar(&header);
+    search.set_margin_start(12);
+    search.set_margin_end(12);
+    search.set_margin_bottom(6);
+    view.add_top_bar(&search);
+    view.set_content(Some(&page));
+    dialog.set_child(Some(&view));
+    dialog.present(Some(parent));
+    dialog
+}
+
+/// Antigüedad en pocas palabras.
+fn ago(seconds: i64) -> String {
+    match seconds.max(0) {
+        s if s < 90 => "ahora mismo".to_string(),
+        s if s < 3600 => format!("hace {} min", s / 60),
+        s if s < 2 * 86_400 => format!("hace {} h", s / 3600),
+        s => format!("hace {} días", s / 86_400),
+    }
+}
+
+fn size_text(bytes: u64) -> String {
+    match bytes {
+        b if b < 1024 * 1024 => format!("{} KB", b.div_ceil(1024)),
+        b => format!("{} MB", b / (1024 * 1024)),
+    }
+}

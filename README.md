@@ -14,7 +14,7 @@ En Ubuntu 24.04, Kubuntu 24.04 o Debian 13:
 
 ```sh
 sudo apt install build-essential pkg-config tmux \
-  libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libsqlite3-dev
+  libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev libsqlite3-dev
 git clone https://github.com/ALArvi019/ALarviTerm.git
 cd ALarviTerm
 ./scripts/install.sh
@@ -33,8 +33,10 @@ Hace falta Rust 1.85 o posterior, que se instala con [rustup](https://rustup.rs)
 * Indica el estado real de cada proceso: Activa, Terminada, Error con su código, o Desconectada.
 * Sigue lo que hace cada Claude Code a partir de sus propios eventos: Pensando, Ejecutando una herramienta, Pide permiso, Esperando respuesta o Compactando.
 * Avisa con una notificación de escritorio cuando una sesión pide permiso o termina su turno y la ventana no está delante.
-* Muestra en el pie la rama de git y los cambios pendientes, el modelo que respondió y el consumo de CPU y memoria de la sesión activa.
-* Muestra lo que queda de los límites de uso de la cuenta, el de 5 horas y el de 7 días, con barras finas, y cuánto falta para que se reinicien.
+* Muestra en el pie el modo de permisos de Claude Code de la sesión a la vista, resaltado cuando actúa sin preguntar.
+* Muestra en el pie la rama de git y los cambios pendientes, el modelo que respondió y el consumo de CPU, memoria y red del equipo, con un panel ampliado al pasar el ratón.
+* Muestra lo usado de los límites de la cuenta, el de 5 horas y el de 7 días, con barras finas, y cuánto falta para que se reinicien.
+* Trae a un proyecto las conversaciones de Claude Code que ya existen y separa límites y estadísticas por cuenta cuando trabajas con más de una.
 * Tiene un panel de estadísticas de uso de Claude Code: tokens, sesiones, tiempo activo, actividad por día y por hora, modelos y carpetas.
 * Admite complementos: programas externos que añaden a cada sesión una etiqueta, un cronómetro y acciones propias.
 * Ofrece una paleta de comandos con búsqueda sobre todas las acciones, las sesiones y las disposiciones.
@@ -61,7 +63,7 @@ Ubuntu, Kubuntu y Debian:
 
 ```sh
 sudo apt install build-essential pkg-config tmux \
-  libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libsqlite3-dev
+  libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev libsqlite3-dev
 ```
 
 Fedora:
@@ -87,7 +89,7 @@ Si no puedes instalar los paquetes de desarrollo en el sistema, el repositorio t
 ./target/release/alarviterm
 ```
 
-El binario generado así lleva la ruta de `.sysroot/runtime` para encontrar `libvte-2.91-gtk4`, que es la única biblioteca que el sistema no trae. Al instalar los paquetes con `apt`, borra `.sysroot/` y compila con `cargo` directamente.
+El binario generado así lleva la ruta de `.sysroot/runtime` para encontrar `libvte-2.91-gtk4` y `libgtksourceview-5`, que son las bibliotecas que el sistema puede no traer. Al instalar los paquetes con `apt`, borra `.sysroot/` y compila con `cargo` directamente.
 
 ## Uso
 
@@ -139,6 +141,8 @@ Con el botón derecho sobre una sesión o un grupo aparece su menú. Un clic en 
 
 Un clic en una sesión de la barra lateral la abre como pestaña en el panel con foco. Si ya está abierta en otro panel, lleva el foco allí. Una sesión se muestra en un solo panel a la vez.
 
+Las pestañas se reordenan arrastrándolas: al soltar una sobre otra queda a su izquierda o a su derecha, según la mitad en la que caiga. El clic derecho sobre una pestaña ofrece cerrarla, cerrar las demás, o cerrar las que tiene a un lado. Cerrar una pestaña no detiene la sesión.
+
 Cerrar una pestaña no detiene la sesión: el proceso sigue en marcha y se puede volver a abrir desde la barra lateral. Para terminar el proceso está Detener, en el menú de la sesión.
 
 Doble clic en una sesión de la barra lateral, o en una pestaña, maximiza su panel. El botón de la cuadrícula en la cabecera ofrece disposiciones predefinidas y permite guardar la actual con un nombre.
@@ -149,11 +153,61 @@ Para seleccionar texto con el ratón mantén pulsada `Mayús` mientras arrastras
 
 Un proyecto es una carpeta con nombre. Se gestionan desde el menú de la cabecera, Proyectos, o desde la paleta. Cada uno tiene:
 
-* Un color y un icono de uno o dos caracteres, que forman la etiqueta que sus sesiones llevan en la barra lateral.
+* Un color y un icono de uno o dos caracteres, que forman la etiqueta que sus sesiones llevan en la barra lateral. En lugar del icono de texto puede llevar una imagen, por ejemplo el logotipo del cliente.
 * Variables de entorno, que heredan sus sesiones. Si una sesión define la misma variable, gana la de la sesión.
 * Un comando de inicio, que se ejecuta en el shell justo antes de cada sesión. Sirve para activar un entorno virtual o elegir una versión de Node. Si falla, la sesión no arranca y el error queda a la vista en el terminal.
 
 Para crear una sesión dentro de un proyecto, elígelo en el formulario de sesión nueva, pulsa el botón de añadir de su fila en la lista de proyectos, o escribe su nombre en la paleta. Un terminal nuevo nace en el proyecto de la sesión actual. Desde el menú de una sesión se puede cambiar de proyecto, y el entorno nuevo vale a partir de su siguiente reinicio. El buscador de la barra lateral también encuentra por nombre de proyecto. Borrar un proyecto no borra sus sesiones.
+
+### Traer conversaciones que ya existen
+
+Las conversaciones de Claude Code que tienes abiertas o guardadas fuera de ALarviTerm se pueden añadir a un proyecto sin perder su historial. En la lista de proyectos, el botón del reloj de cada fila abre las conversaciones guardadas en esa carpeta, con el nombre que les pusiste con `/rename`. También está en la paleta, como "Añadir conversaciones existentes al proyecto". Marca las que quieras y cada una pasa a ser una sesión del proyecto, lanzada con `claude --resume` y con los argumentos propuestos en Ajustes.
+
+Una conversación que otro terminal tiene abierta aparece desactivada. Ciérrala allí antes, porque dos procesos escribiendo en la misma conversación la estropean.
+
+### Grupos plegados
+
+Un grupo plegado enseña en su cabecera el estado de lo que tiene dentro, con el mismo punto de color que las sesiones y un texto corto. Manda lo que te necesita: si alguna sesión pide permiso se ve eso, si no, las que esperan tu respuesta, después las que trabajan, las que tienen trabajo en segundo plano, y al final si están todas paradas.
+
+Una sesión que ha terminado su turno pero dejó un comando o un subagente corriendo no espera nada de ti, espera a que eso acabe. Se distingue con un punto morado y el texto "Comando en segundo plano" o "Subagente en segundo plano", y no cuenta como una sesión que te espera. El comando se sabe por lo que el propio Claude Code publica de sus sesiones, y los subagentes por sus eventos de inicio y de fin.
+
+### Encender y apagar en bloque
+
+Las sesiones que no necesitas se pueden apagar sin perderlas: dejan de gastar memoria y siguen en la lista. La cabecera de cada grupo lleva un interruptor, verde cuando tiene sesiones en marcha. Al pulsarlo las apaga todas, y con todas apagadas las enciende. Al encender, cada sesión de Claude Code retoma su propia conversación. Lo mismo se puede hacer por proyecto, con el interruptor de su fila en la lista de proyectos o desde la paleta, con "Encender las sesiones del proyecto" y "Apagar las sesiones del proyecto". Apagar pide confirmación, porque interrumpe lo que esté a medias.
+
+### Control de código fuente
+
+La columna izquierda tiene dos pestañas: Sesiones y Código. La de código reúne, sin configurar nada, los repositorios de git de las carpetas que tienes abiertas, las de tus proyectos y las de tus sesiones, y con ellos sus demás árboles de trabajo. El número de la pestaña es el total de ficheros cambiados.
+
+* Cada repositorio se despliega en el árbol de sus ficheros cambiados, y solo esos. Las carpetas se pliegan con un clic y cada fichero lleva su letra: `M` modificado, `A` añadido, `U` sin seguimiento, `D` borrado, `R` renombrado.
+* Un clic en un fichero lo abre en una comparación que ocupa el sitio de los terminales: a un lado cómo estaba en la última confirmación y al otro cómo está ahora, con resaltado de sintaxis, las líneas quitadas en rojo y las añadidas en verde. Las dos mitades se desplazan a la par, y `Alt+Abajo` y `Alt+Arriba` saltan de un cambio a otro.
+* La mitad de la derecha es un editor: se retoca el fichero y `Ctrl+S` lo guarda. La comparación se rehace mientras escribes. Si cambias de fichero o cierras con cambios sin guardar, pregunta antes.
+* `Escape`, el botón de cerrar o volver a la pestaña Sesiones devuelven los terminales tal y como estaban. Las sesiones siguen trabajando mientras tanto.
+
+`Ctrl+Mayús+K`, la entrada "Control de código fuente" del menú de una sesión, o un clic en la rama del pie llevan a la pestaña con el repositorio de esa sesión desplegado y su primer cambio abierto. Los cambios se releen al entrar en la pestaña, cada pocos segundos mientras está a la vista, al guardar y con su botón de refrescar.
+
+No confirma, no prepara ni descarta cambios: para eso sigue estando git o la propia sesión. Los ficheros binarios y los de más de 2 MB no se abren.
+
+### Columna de listas
+
+El botón de la derecha de la cabecera, o `Ctrl+Mayús+L`, abre una columna a la derecha con las listas que los complementos tienen para la sesión a la vista: sus tareas, sus pendientes. Lo que queda por hacer va primero, con una barra de progreso. El mismo complemento puede poner el resumen, como `3/10`, junto al nombre de la sesión en la barra lateral. La columna solo enseña: para cambiar una lista se usa la herramienta que la lleva.
+
+### El aspecto de Claude Code dentro de ALarviTerm
+
+El cuadro donde escribes y el resto de la interfaz de Claude Code los dibuja el propio Claude Code, no ALarviTerm. Lo que sí se puede elegir es su tema solo para estas sesiones: en Ajustes, Programas, "Tema de Claude Code en las sesiones", escribe el nombre de un tema, como `dark` o `custom:mi-tema`. Un tema propio es un fichero JSON en `~/.claude/themes/` y cambia, entre otros, el color del marco del cuadro de texto (`promptBorder`). Fuera de ALarviTerm sigue valiendo tu tema de siempre, porque tus ajustes de Claude Code no se tocan.
+
+### Registro y cierres inesperados
+
+ALarviTerm escribe sus avisos y errores en `alarviterm.log`, en su carpeta de datos. Si se cierra por un fallo propio, ahí quedan el mensaje, el lugar del código y la pila de llamadas. Si el fallo ocurre dentro de una biblioteca del sistema solo queda anotada la señal, y el detalle está en `journalctl -k`. Al abrirla después de un cierre así, la aplicación avisa y dice dónde mirar. Las sesiones no se pierden: viven en tmux.
+
+### Varias cuentas de Claude
+
+Si un proyecto trabaja con otra cuenta, por ejemplo porque su comando de inicio exporta otro `CLAUDE_CODE_OAUTH_TOKEN`, ponle un nombre en el campo "Cuenta de Claude" del proyecto. Es una etiqueta a tu elección, no una credencial. Con ella:
+
+* El pie muestra los límites de 5 horas y de 7 días de la cuenta de la sesión que tienes a la vista, sin mezclarlos con los de otra.
+* El panel de estadísticas deja elegir cuenta. El reparto se hace por carpeta: lo trabajado en la carpeta de un proyecto cuenta para la cuenta de ese proyecto y todo lo demás para la predeterminada. Las transcripciones de Claude Code no dicen con qué cuenta se hizo cada mensaje, así que es una atribución por carpeta y no un dato de la cuenta.
+
+El token conviene obtenerlo en el comando de inicio, de un fichero o de un gestor de secretos, y no escribirlo en las variables del proyecto, que se guardan en claro en la base de datos.
 
 ### Ajustes
 
@@ -253,7 +307,7 @@ Compila en modo release e instala en `~/.local`: los binarios en `~/.local/bin`,
 sudo apt install ./target/alarviterm_0.1.0_amd64.deb
 ```
 
-El paquete declara sus dependencias (GTK 4, libadwaita, VTE para GTK4, SQLite y tmux), así que `apt` las instala. El binario que lleva no contiene rutas de la máquina donde se compiló.
+El paquete declara sus dependencias (GTK 4, libadwaita, VTE para GTK4, GtkSourceView, SQLite y tmux), así que `apt` las instala. El binario que lleva no contiene rutas de la máquina donde se compiló.
 
 ## Desinstalar
 
@@ -273,20 +327,28 @@ rm -rf ~/.local/share/alarviterm
 
 ## Límites de uso de la cuenta
 
-El pie muestra un medidor por ventana: una barra fina con lo que queda, el porcentaje y el tiempo hasta el reinicio. La barra es verde, pasa a ámbar por debajo del 50 % y a rojo por debajo del 20 %. Al pulsar se abre un panel con el detalle: porcentaje usado, hora exacta del reinicio y antigüedad del dato.
+El pie muestra un medidor por ventana: una barra fina que se llena con lo usado, el porcentaje usado y el tiempo hasta el reinicio. La barra es verde, pasa a ámbar cuando queda menos de la mitad y a rojo cuando queda menos de un 20 %. Al pasar el ratón se abre un panel con el detalle: porcentaje usado, hora exacta del reinicio y antigüedad del dato.
 
 ![Medidores del pie y panel de límites](docs/captura-limites.png)
 
-Junto a ellos hay dos medidores de consumo, cada uno con una gráfica diminuta de las últimas muestras de CPU, su valor y la memoria. El primero es el de la sesión activa. El segundo, con la etiqueta APP, es el de la propia aplicación sin contar las sesiones. Su memoria es la proporcional del proceso, que reparte las bibliotecas compartidas entre los programas que las usan, y el texto de ayuda da también la residente.
+A su izquierda está el medidor del equipo: CPU con una gráfica diminuta, memoria con una barra, y red con la velocidad de bajada y de subida. Al pasar el ratón se abre un panel con las gráficas grandes: CPU con la carga media, memoria e intercambio en uso, y red con la bajada hacia arriba y la subida hacia abajo, más lo transferido desde que se abrió la aplicación. El mismo panel da el consumo de la sesión activa y el de la propia aplicación sin contar las sesiones, cada uno con su gráfica de CPU y su memoria. La memoria de la aplicación es la proporcional del proceso, que reparte las bibliotecas compartidas entre los programas que las usan, y el texto de ayuda da también la residente.
+
+![Medidor del equipo con su panel ampliado](docs/captura-medidores.png)
+
+El panel lista también los programas que más CPU y más memoria consumen, agrupando los procesos de un mismo programa. Esa lista solo se calcula mientras el panel está abierto. Un clic sobre el medidor deja el panel fijo, y otro clic lo suelta.
+
+La red suma solo las interfaces físicas, para no contar dos veces lo que pasa por puentes y túneles. Los paneles no capturan el foco: el terminal sigue recibiendo lo que escribes mientras están abiertos.
 
 El dato lo da el propio Claude Code a su línea de estado. ALarviTerm registra `alarviterm-hook statusline` como línea de estado de las sesiones que lanza, guarda los límites y a continuación ejecuta la línea de estado que tengas en `~/.claude/settings.json`, con la misma entrada, así que la tuya se ve como siempre. No se lee ninguna credencial ni se hace ninguna petición.
 
 A tener en cuenta:
 
 * Solo hay dato con una suscripción de Claude y después de la primera respuesta de alguna sesión. Se actualiza cuando una sesión responde.
-* Es de la cuenta, no de la sesión. Con sesiones de cuentas distintas se ve el de la última que respondió.
+* Es de la cuenta, no de la sesión. Con sesiones de cuentas distintas, pon nombre a la cuenta en cada proyecto y el pie mostrará la de la sesión a la vista. Sin nombre, todas comparten el mismo dato y se ve el de la última que respondió.
 * Una línea de estado definida en los ajustes de un proyecto no se ejecuta, solo la de tus ajustes personales. Tampoco se copian sus opciones `padding` y `refreshInterval`.
 * Se apaga en Ajustes, Pie de la ventana, Límites de la cuenta. El cambio vale para las sesiones que se inicien después.
+* Junto a los límites va el contexto de la sesión a la vista, con la etiqueta CTX: lo que lleva usado de su ventana de contexto, que también llega por la línea de estado.
+* Si tu línea de estado repite lo que ya enseña el pie, apágala para las sesiones de ALarviTerm en Ajustes, Pie de la ventana, Tu línea de estado de Claude Code. Fuera de ALarviTerm se sigue viendo, porque tus ajustes de Claude Code no se tocan.
 
 ## Estadísticas de uso
 

@@ -15,7 +15,7 @@ app_id="io.github.alarvi019.ALarviTerm"
 bin_dir="$prefix/bin"
 lib_dir="$prefix/lib/alarviterm"
 desktop="$prefix/share/applications/$app_id.desktop"
-icon="$prefix/share/icons/hicolor/scalable/apps/$app_id.svg"
+icons="$prefix/share/icons/hicolor"
 
 refresh_caches() {
   command -v update-desktop-database >/dev/null && update-desktop-database "$prefix/share/applications" 2>/dev/null || true
@@ -23,7 +23,8 @@ refresh_caches() {
 }
 
 if [ "${1:-}" = "--uninstall" ]; then
-  rm -f "$bin_dir/alarviterm" "$bin_dir/alarviterm-hook" "$desktop" "$icon"
+  rm -f "$bin_dir/alarviterm" "$bin_dir/alarviterm-hook" "$desktop"
+  rm -f "$icons"/*/apps/"$app_id".png "$icons/scalable/apps/$app_id.svg"
   rm -rf "$lib_dir"
   refresh_caches
   echo "ALarviTerm desinstalado de $prefix."
@@ -39,7 +40,11 @@ echo "Compilando en modo release..."
 install -Dm755 "$root/target/release/alarviterm" "$bin_dir/alarviterm"
 # El binario de hooks va junto al principal, que es donde este lo busca.
 install -Dm755 "$root/target/release/alarviterm-hook" "$bin_dir/alarviterm-hook"
-install -Dm644 "$root/data/icons/$app_id.svg" "$icon"
+for size in "$root"/data/icons/hicolor/*/; do
+  install -Dm644 "$size/apps/$app_id.png" "$icons/$(basename "$size")/apps/$app_id.png"
+done
+# El icono vectorial de versiones anteriores taparía al nuevo.
+rm -f "$icons/scalable/apps/$app_id.svg"
 install -d "$(dirname "$desktop")"
 # Ruta absoluta: el lanzador del escritorio puede no tener ~/.local/bin en el PATH.
 sed "s|^Exec=.*|Exec=$bin_dir/alarviterm|" "$root/data/$app_id.desktop" > "$desktop"
@@ -49,11 +54,32 @@ if ! ldconfig -p 2>/dev/null | grep -q 'libvte-2\.91-gtk4\.so\.0'; then
   runtime="$root/.sysroot/runtime"
   if compgen -G "$runtime/libvte-2.91-gtk4.so.0*" >/dev/null; then
     install -d "$lib_dir"
-    cp -a "$runtime"/libvte-2.91-gtk4.so.0* "$lib_dir/"
+    # Sin sobrescribir en el sitio: una instancia abierta tiene la biblioteca
+    # cargada y cambiarle el contenido la tumbaría.
+    cp -a --remove-destination "$runtime"/libvte-2.91-gtk4.so.0* "$lib_dir/"
     echo "El sistema no tiene libvte para GTK4. Se ha copiado una a $lib_dir."
     echo "Lo limpio es instalarla: sudo apt install libvte-2.91-gtk4-0"
   else
     echo "Aviso: falta libvte-2.91-gtk4. Instálala con: sudo apt install libvte-2.91-gtk4-0" >&2
+  fi
+fi
+
+# Lo mismo con GtkSourceView, el editor del control de código fuente: la
+# biblioteca y sus lenguajes y esquemas de color.
+if ! ldconfig -p 2>/dev/null | grep -q 'libgtksourceview-5\.so\.0'; then
+  runtime="$root/.sysroot/runtime"
+  data="$root/.sysroot/root/usr/share/gtksourceview-5"
+  if compgen -G "$runtime/libgtksourceview-5.so.0*" >/dev/null && [ -d "$data" ]; then
+    # Todo dentro de la carpeta de bibliotecas, que es solo de la aplicación.
+    # En share/alarviterm están las sesiones del usuario y ahí no se toca.
+    install -d "$lib_dir"
+    cp -a --remove-destination "$runtime"/libgtksourceview-5.so.0* "$lib_dir/"
+    rm -rf "$lib_dir/gtksourceview-5"
+    cp -a "$data" "$lib_dir/gtksourceview-5"
+    echo "El sistema no tiene GtkSourceView 5. Se ha copiado una a $lib_dir."
+    echo "Lo limpio es instalarla: sudo apt install libgtksourceview-5-0"
+  else
+    echo "Aviso: falta libgtksourceview-5. Instálala con: sudo apt install libgtksourceview-5-0" >&2
   fi
 fi
 

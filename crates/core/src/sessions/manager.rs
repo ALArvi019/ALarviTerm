@@ -113,6 +113,15 @@ impl SessionManager {
                 (Vec::new(), Some(e.to_string()))
             }
         };
+        // Lo que el propio Claude Code publica de sus sesiones: cuáles tienen
+        // un comando corriendo en segundo plano.
+        let background = if self.monitor.is_some() {
+            crate::limits::claude_config_dir()
+                .map(|dir| crate::claude::conversations::with_background_shell(&dir))
+                .unwrap_or_default()
+        } else {
+            Default::default()
+        };
         let sessions = sessions
             .into_iter()
             .map(|session| {
@@ -120,7 +129,11 @@ impl SessionManager {
                 let liveness = found.map(|l| l.liveness.clone()).unwrap_or(Liveness::Missing);
                 let agent = match &self.monitor {
                     Some(monitor) if session.kind == SessionKind::Claude && liveness.is_alive() => {
-                        monitor.store.read(&session.id)
+                        monitor.store.read(&session.id).map(|mut state| {
+                            state.background_shell =
+                                state.conversation.as_ref().is_some_and(|id| background.contains(id));
+                            state
+                        })
                     }
                     _ => None,
                 };
@@ -151,6 +164,16 @@ impl SessionManager {
                 new.cwd.display()
             )));
         }
+        let resume = match new.resume.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+            None => Resume::Fresh,
+            Some(_) if new.kind != SessionKind::Claude => {
+                return Err(Error::Invalid("solo una sesión de Claude Code puede reanudar una conversación".into()));
+            }
+            Some(conversation) if !crate::claude::conversations::valid_id(conversation) => {
+                return Err(Error::Invalid(format!("«{conversation}» no es un identificador de conversación")));
+            }
+            Some(conversation) => Resume::Conversation(conversation.to_string()),
+        };
         let id = random_id()?;
         let session = Session {
             backend_id: format!("mt-{id}"),
@@ -170,7 +193,7 @@ impl SessionManager {
             archived: false,
             profile: None,
         };
-        let spec = self.launch_spec(&session, &Resume::Fresh)?;
+        let spec = self.launch_spec(&session, &resume)?;
         self.backend.create_session(&spec)?;
         if let Err(e) = self.db.insert_session(&session) {
             // Sin registro en la base de datos el proceso quedaría huérfano.
@@ -296,6 +319,7 @@ impl SessionManager {
             None => None,
         };
         let startup = project.as_ref().map(|p| p.startup.as_str());
+        let account = project.as_ref().map(|p| p.account.clone()).filter(|a| !a.is_empty());
         let argv = build_argv(
             session,
             self.claude.as_deref(),
@@ -312,7 +336,12 @@ impl SessionManager {
             .filter(|(key, _)| session.env.iter().all(|(own, _)| own != key))
             .collect();
         env.extend(session.env.iter().cloned());
-        env.retain(|(key, _)| key != SESSION_ENV && key != STATE_DIR_ENV && key != LAUNCH_ENV);
+        env.retain(|(key, _)| {
+            key != SESSION_ENV && key != STATE_DIR_ENV && key != LAUNCH_ENV && key != crate::limits::ACCOUNT_ENV
+        });
+        if let Some(account) = account {
+            env.push((crate::limits::ACCOUNT_ENV.to_string(), account));
+        }
         env.push((SESSION_ENV.to_string(), session.id.clone()));
         if let Some(monitor) = &self.monitor {
             // Cada arranque lleva su marca: el proceso anterior aún puede
@@ -452,6 +481,7 @@ mod tests {
             extra_args: String::new(),
             env: vec![("FOO".into(), "bar".into())],
             project_id: None,
+            resume: None,
         }
     }
 
@@ -466,6 +496,7 @@ mod tests {
                 path: std::env::temp_dir(),
                 env: vec![("FOO".into(), "del proyecto".into()), ("NODE_ENV".into(), "dev".into())],
                 startup: "nvm use 20".into(),
+                account: "Trabajo".into(),
                 ..NewProject::default()
             })
             .expect("proyecto");
@@ -478,6 +509,7 @@ mod tests {
             let (spec, _) = &state.sessions[0];
             assert_eq!(spec.argv[2], "nvm use 20 && exec /usr/bin/claude --model opus");
             assert!(spec.env.contains(&("NODE_ENV".into(), "dev".into())));
+            assert!(spec.env.contains(&(crate::limits::ACCOUNT_ENV.into(), "Trabajo".into())));
             // La variable de la sesión gana a la del proyecto.
             assert!(spec.env.contains(&("FOO".into(), "bar".into())));
             assert!(!spec.env.iter().any(|(_, v)| v == "del proyecto"));
@@ -489,6 +521,7 @@ mod tests {
         manager.relaunch(&session.id, Resume::Fresh).expect("relanza");
         let state = backend.0.borrow();
         assert_eq!(state.sessions[0].0.argv[2], "exec /usr/bin/claude --model opus");
+        assert!(!state.sessions[0].0.env.iter().any(|(k, _)| k == crate::limits::ACCOUNT_ENV));
 
         drop(state);
         manager.set_archived(&session.id, true).expect("archiva");
@@ -545,6 +578,23 @@ mod tests {
         manager.relaunch(&session.id, Resume::Fresh).expect("relanza");
         assert!(manager.snapshot().expect("estado").sessions[0].liveness.is_alive());
         assert_eq!(backend.0.borrow().sessions.len(), 1, "no debe duplicar");
+    }
+
+    #[test]
+    fn a_new_session_can_start_from_an_existing_conversation() {
+        let (manager, backend) = manager();
+        let mut new = new_session(SessionKind::Claude);
+        new.resume = Some("abc-123".into());
+        manager.create_session(new).expect("crea");
+        assert!(backend.0.borrow().sessions[0].0.argv[2].contains("--resume abc-123"));
+
+        let mut shell = new_session(SessionKind::Shell);
+        shell.resume = Some("abc-123".into());
+        assert!(manager.create_session(shell).is_err());
+        let mut odd = new_session(SessionKind::Claude);
+        odd.resume = Some("--otra-cosa".into());
+        assert!(manager.create_session(odd).is_err());
+        assert_eq!(backend.0.borrow().sessions.len(), 1);
     }
 
     #[test]

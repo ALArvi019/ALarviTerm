@@ -68,13 +68,14 @@ Entrada:
       "kind": "claude",
       "group": "Trabajo",
       "project": null,
-      "alive": true
+      "alive": true,
+      "conversation": "0c5f3fec-42d6-486d-a108-46b0cefa5871"
     }
   ]
 }
 ```
 
-`kind` es `claude` o `shell`. `group` y `project` son nombres, o `null`.
+`kind` es `claude` o `shell`. `group` y `project` son nombres, o `null`. `conversation` es el identificador de la conversación de Claude Code que lleva la sesión, o `null` si aún no se conoce.
 
 Salida:
 
@@ -89,7 +90,14 @@ Salida:
       "actions": [
         { "id": "parar", "label": "Parar la tarea", "icon": "media-playback-stop-symbolic", "button": true },
         { "id": "ver", "label": "Abrir la tarea en la web" }
-      ]
+      ],
+      "panel": {
+        "title": "Pendientes",
+        "items": [
+          { "text": "Revisar el despliegue", "done": false },
+          { "text": "Subir la rama", "done": true }
+        ]
+      }
     }
   },
   "error": null
@@ -103,6 +111,7 @@ Salida:
 | `timer_since` | Segundos Unix desde los que corre un cronómetro. La aplicación lo hace avanzar sola, sin volver a preguntar. |
 | `tooltip` | Texto de ayuda de la etiqueta y del cronómetro. |
 | `actions` | Acciones para esa sesión. Como mucho 12. |
+| `panel` | Lista que se enseña en la columna derecha cuando la sesión está a la vista. Lleva un `title` y hasta 200 `items`. |
 | `error` | Problema que contar al usuario, por ejemplo que no hay red. Se avisa una vez mientras no cambie. |
 
 De cada acción:
@@ -113,6 +122,15 @@ De cada acción:
 | `label` | Texto del menú y de la ayuda del botón. Obligatorio. |
 | `icon` | Nombre de un icono simbólico del tema, como `media-playback-start-symbolic`. |
 | `button` | Con `true` la acción tiene además un botón en la fila de la sesión. Sin icono, el botón lleva el texto. |
+
+De cada elemento de `panel`:
+
+| Campo | Significado |
+| --- | --- |
+| `text` | Texto del elemento, hasta 400 caracteres. Obligatorio. |
+| `done` | Con `true` o `false` el elemento es una casilla, hecha o pendiente, y cuenta para la barra de progreso. Sin él es una línea de texto. |
+
+La columna es de solo lectura. Lo pendiente se enseña antes que lo hecho. El ejemplo de `examples/plugins/pendientes` la rellena con las casillas del `TODO.md` de la carpeta de cada sesión.
 
 Las sesiones que no aparecen en la respuesta se quedan sin nada. Si el programa falla o tarda demasiado, la aplicación conserva lo último que dijo y avisa.
 

@@ -129,15 +129,21 @@ pub fn show(
         .description("Datos de la sesión activa y de la cuenta.")
         .build();
     type Flag = fn(&mut Settings) -> &mut bool;
-    let footer_rows: [(&str, &str, bool, Flag); 4] = [
+    let footer_rows: [(&str, &str, bool, Flag); 5] = [
         ("Rama de git", "Rama y ficheros con cambios.", current.footer_git, |s| &mut s.footer_git),
         ("Modelo", "El que respondió en el último turno.", current.footer_model, |s| &mut s.footer_model),
-        ("Consumo", "CPU y memoria de la sesión activa y de la propia aplicación.", current.footer_usage, |s| &mut s.footer_usage),
+        ("Consumo", "CPU, memoria y red del equipo. Al pasar el ratón, también la sesión activa y la propia aplicación.", current.footer_usage, |s| &mut s.footer_usage),
         (
             "Límites de la cuenta",
             "Lo que queda de las ventanas de 5 horas y de 7 días. Se aplica a las sesiones que se inicien después.",
             current.account_limits,
             |s| &mut s.account_limits,
+        ),
+        (
+            "Tu línea de estado de Claude Code",
+            "La que tienes en tus ajustes de Claude Code, bajo el cuadro de texto de cada sesión. Apagada, sus datos se ven solo en este pie. Se aplica a las sesiones que se inicien después.",
+            current.session_statusline,
+            |s| &mut s.session_statusline,
         ),
     ];
     let notice_rows: [(&str, &str, bool, Flag); 2] = [
@@ -266,9 +272,32 @@ pub fn show(
             prefs.change(|s| s.default_model = model);
         });
     }
+    let args = entry("Argumentos propuestos al crear una sesión", &current.default_args);
+    {
+        let prefs = prefs.clone();
+        args.connect_apply(move |row| {
+            let args = row.text().trim().to_string();
+            prefs.change(|s| s.default_args = args);
+        });
+    }
     claude.add(&claude_path);
     claude.add(&claude_note);
     claude.add(&model);
+    let theme = entry("Tema de Claude Code en las sesiones (vacío: el tuyo)", &current.claude_theme);
+    theme.set_tooltip_text(Some(
+        "Nombre de un tema de Claude Code, como dark o custom:mi-tema, solo para las sesiones de \
+         ALarviTerm. Con un tema propio se cambian, entre otros, los colores del cuadro de texto. \
+         Se aplica a las sesiones que se inicien después.",
+    ));
+    {
+        let prefs = prefs.clone();
+        theme.connect_apply(move |row| {
+            let theme = row.text().trim().to_string();
+            prefs.change(|s| s.claude_theme = theme);
+        });
+    }
+    claude.add(&args);
+    claude.add(&theme);
     programs.add(&claude);
 
     let shell_group = adw::PreferencesGroup::builder()

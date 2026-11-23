@@ -27,7 +27,9 @@ rm -rf "$stage"
 install -Dm755 "$build/release/alarviterm" "$stage/usr/bin/alarviterm"
 install -Dm755 "$build/release/alarviterm-hook" "$stage/usr/bin/alarviterm-hook"
 install -Dm644 "$root/data/$app_id.desktop" "$stage/usr/share/applications/$app_id.desktop"
-install -Dm644 "$root/data/icons/$app_id.svg" "$stage/usr/share/icons/hicolor/scalable/apps/$app_id.svg"
+for size in "$root"/data/icons/hicolor/*/; do
+  install -Dm644 "$size/apps/$app_id.png" "$stage/usr/share/icons/hicolor/$(basename "$size")/apps/$app_id.png"
+done
 install -Dm644 "$root/README.md" "$stage/usr/share/doc/alarviterm/README.md"
 strip "$stage/usr/bin/alarviterm" "$stage/usr/bin/alarviterm-hook" 2>/dev/null || true
 
@@ -49,7 +51,7 @@ Section: utils
 Priority: optional
 Architecture: $arch
 Installed-Size: $size
-Depends: libc6, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libvte-2.91-gtk4-0 (>= 0.76), libsqlite3-0, tmux (>= 3.2)
+Depends: libc6, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libvte-2.91-gtk4-0 (>= 0.76), libgtksourceview-5-0, libsqlite3-0, tmux (>= 3.2)
 Recommends: git
 Maintainer: ALArvi019 <5780489+ALArvi019@users.noreply.github.com>
 Description: Centro de control para sesiones de Claude Code

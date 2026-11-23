@@ -119,6 +119,10 @@ struct Panel {
     library: SharedLibrary,
     cache: PathBuf,
     range: Cell<usize>,
+    /// Cuentas con nombre y sus carpetas, según los proyectos.
+    accounts: Vec<(String, Vec<PathBuf>)>,
+    /// 0: todas las cuentas. 1: la predeterminada. Después, las de `accounts`.
+    account: Cell<usize>,
     /// Número de la última consulta lanzada: las respuestas viejas se tiran.
     request: Cell<u64>,
     summary: Rc<RefCell<Summary>>,
@@ -329,6 +333,7 @@ impl Panel {
         self.status.set_text("Leyendo las transcripciones de Claude Code…");
 
         let (library, cache) = (self.library.clone(), self.cache.clone());
+        let (accounts, account) = (self.accounts.clone(), self.account.get());
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let result = gio::spawn_blocking(move || {
@@ -341,7 +346,13 @@ impl Panel {
                         log::warn!("no se pudo guardar la caché de estadísticas: {e}");
                     }
                 }
-                Some((library.summarize(start, now, stats::system_local), report))
+                let named = |cwd: &str, folders: &[PathBuf]| folders.iter().any(|f| stats::is_under(cwd, f));
+                let keep = |cwd: &str| match account {
+                    0 => true,
+                    1 => !accounts.iter().any(|(_, folders)| named(cwd, folders)),
+                    n => accounts.get(n - 2).is_some_and(|(_, folders)| named(cwd, folders)),
+                };
+                Some((library.summarize_where(start, now, stats::system_local, &keep), report))
             })
             .await;
             let Some(panel) = weak.upgrade() else {
@@ -453,7 +464,15 @@ impl Panel {
 }
 
 /// Abre el panel de estadísticas.
-pub fn show(parent: &impl IsA<gtk::Widget>, library: SharedLibrary, cache: PathBuf) -> adw::Dialog {
+///
+/// `accounts` son las cuentas con nombre y las carpetas de sus proyectos. Con
+/// alguna, el panel deja ver el uso de cada una por separado.
+pub fn show(
+    parent: &impl IsA<gtk::Widget>,
+    library: SharedLibrary,
+    cache: PathBuf,
+    accounts: Vec<(String, Vec<PathBuf>)>,
+) -> adw::Dialog {
     let summary = Rc::new(RefCell::new(Summary::default()));
 
     let cards = [
@@ -585,6 +604,16 @@ pub fn show(parent: &impl IsA<gtk::Widget>, library: SharedLibrary, cache: PathB
     header.set_title_widget(Some(&title));
     header.pack_start(&period);
     header.pack_end(&choices);
+    let mut account_names = vec!["Todas las cuentas".to_string(), "Cuenta predeterminada".to_string()];
+    account_names.extend(accounts.iter().map(|(name, _)| format!("Cuenta {name}")));
+    let account_refs: Vec<&str> = account_names.iter().map(String::as_str).collect();
+    let account_choice = gtk::DropDown::from_strings(&account_refs);
+    account_choice.set_visible(!accounts.is_empty());
+    account_choice.set_tooltip_text(Some(
+        "El uso se reparte por carpeta: lo hecho en la carpeta de un proyecto cuenta para la cuenta \
+         que ese proyecto tiene puesta. El resto va a la predeterminada.",
+    ));
+    header.pack_end(&account_choice);
     header.pack_end(&spinner);
     let view = adw::ToolbarView::new();
     view.add_top_bar(&header);
@@ -594,6 +623,8 @@ pub fn show(parent: &impl IsA<gtk::Widget>, library: SharedLibrary, cache: PathB
         library,
         cache,
         range: Cell::new(DEFAULT_RANGE),
+        accounts,
+        account: Cell::new(0),
         request: Cell::new(0),
         summary,
         spinner,
@@ -616,6 +647,15 @@ pub fn show(parent: &impl IsA<gtk::Widget>, library: SharedLibrary, cache: PathB
         button.connect_toggled(move |button| {
             if let Some(panel) = weak.upgrade().filter(|_| button.is_active()) {
                 panel.range.set(index);
+                panel.load();
+            }
+        });
+    }
+    {
+        let weak = Rc::downgrade(&panel);
+        account_choice.connect_selected_notify(move |choice| {
+            if let Some(panel) = weak.upgrade() {
+                panel.account.set(choice.selected() as usize);
                 panel.load();
             }
         });

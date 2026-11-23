@@ -18,7 +18,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config tmux \
-            libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libsqlite3-dev
+            libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libgtksourceview-5-dev libsqlite3-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

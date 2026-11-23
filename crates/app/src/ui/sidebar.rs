@@ -67,6 +67,8 @@ pub struct Sidebar {
     pub list: gtk::ListBox,
     menu: gtk::PopoverMenu,
     rows: RefCell<HashMap<String, SessionRow>>,
+    /// Señal de estado de cada grupo plegado, por su identificador.
+    summaries: RefCell<HashMap<i64, GroupSummary>>,
     /// Sesiones visibles, en el orden en que aparecen.
     order: RefCell<Vec<String>>,
     search_bar: gtk::Revealer,
@@ -93,17 +95,16 @@ impl Sidebar {
     pub fn new() -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("mt-sidebar");
-        root.set_size_request(210, -1);
 
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        header.set_margin_top(10);
+        header.set_margin_top(4);
         header.set_margin_bottom(2);
         header.set_margin_start(14);
         header.set_margin_end(6);
-        let title = gtk::Label::new(Some("SESIONES"));
-        title.add_css_class("mt-sidebar-title");
+        // El nombre de la sección lo da ya la pestaña de arriba: aquí solo
+        // hace falta el hueco que empuja los botones a la derecha.
+        let title = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         title.set_hexpand(true);
-        title.set_xalign(0.0);
         let add_group = gtk::Button::from_icon_name("folder-new-symbolic");
         add_group.add_css_class("flat");
         add_group.set_tooltip_text(Some("Nuevo grupo"));
@@ -166,6 +167,7 @@ impl Sidebar {
             list,
             menu,
             rows: RefCell::new(HashMap::new()),
+            summaries: RefCell::new(HashMap::new()),
             order: RefCell::new(Vec::new()),
             search_bar,
             search,
@@ -280,10 +282,15 @@ impl Sidebar {
             // Qué sesiones pasan el filtro depende también de su estado.
             let (group, project) = (group_name(snapshot, view), project_name(snapshot, view));
             signature.push_str(if filter.accepts(view, group, project) { ":+" } else { ":-" });
+            // De ello depende el botón de arrancar o detener de su grupo.
+            signature.push_str(if view.liveness.is_alive() { "a" } else { "d" });
             signature.push(';');
         }
         for project in &snapshot.projects {
-            signature.push_str(&format!("p{}:{}:{}:{};", project.id, project.name, project.color, project.icon));
+            signature.push_str(&format!(
+                "p{}:{}:{}:{}:{};",
+                project.id, project.name, project.color, project.icon, project.image
+            ));
         }
         if filter.is_active() {
             signature.push_str(&format!("f:{}:{}", filter.status.as_str(), filter.query));
@@ -297,6 +304,7 @@ impl Sidebar {
         self.list.remove_all();
         let mut rows = HashMap::new();
         let mut order = Vec::new();
+        let mut summaries = HashMap::new();
         let now = alarviterm_core::now_unix();
         let filter = self.filter();
         let filtering = filter.is_active();
@@ -326,12 +334,17 @@ impl Sidebar {
                 continue;
             }
             let collapsed = group.collapsed && !filtering;
-            self.list.append(&group_row(
+            let (row, summary) = group_row(
                 &format!("g:{}", group.id),
                 &group.name,
                 members().count(),
                 collapsed,
-            ));
+                Some((group.id, members().filter(|v| v.liveness.is_alive()).count())),
+            );
+            self.list.append(&row);
+            if collapsed {
+                summaries.insert(group.id, summary);
+            }
             if !collapsed {
                 add_sessions(&mut members());
             }
@@ -349,12 +362,14 @@ impl Sidebar {
             if snapshot.groups.is_empty() {
                 add_sessions(&mut ungrouped());
             } else {
-                self.list.append(&group_row(
+                let (row, _) = group_row(
                     UNGROUPED_NAME,
                     "Sin grupo",
                     ungrouped().count(),
                     ungrouped_collapsed,
-                ));
+                    None,
+                );
+                self.list.append(&row);
                 if !ungrouped_collapsed {
                     add_sessions(&mut ungrouped());
                 }
@@ -383,7 +398,32 @@ impl Sidebar {
         let selected_row = selected.and_then(|id| rows.get(id)).map(|r| r.row.clone());
         *self.rows.borrow_mut() = rows;
         *self.order.borrow_mut() = order;
+        *self.summaries.borrow_mut() = summaries;
+        self.update_summaries(snapshot);
         self.list.select_row(selected_row.as_ref());
+    }
+
+    /// Pone en cada grupo plegado el estado de lo que tiene dentro: así se ve
+    /// sin desplegarlo si alguna de sus sesiones espera al usuario.
+    fn update_summaries(&self, snapshot: &Snapshot) {
+        for (group, summary) in self.summaries.borrow().iter() {
+            let members = snapshot
+                .sessions
+                .iter()
+                .filter(|v| v.session.group_id == Some(*group) && !v.session.archived);
+            for class in status::STATUS_CLASSES {
+                summary.dot.remove_css_class(class);
+            }
+            match status::summarize(members) {
+                Some(info) => {
+                    summary.dot.add_css_class(info.class);
+                    summary.text.set_text(&info.label);
+                    summary.holder.set_tooltip_text(Some(&info.tooltip));
+                    summary.holder.set_visible(true);
+                }
+                None => summary.holder.set_visible(false),
+            }
+        }
     }
 
     /// Actualiza indicadores y textos sin tocar la estructura de la lista.
@@ -395,6 +435,7 @@ impl Sidebar {
                 apply_status(entry, view, now);
             }
         }
+        self.update_summaries(snapshot);
     }
 
     /// Pone en cada fila lo que los complementos dicen de su sesión. Hay que
@@ -483,7 +524,16 @@ impl Sidebar {
     }
 }
 
-fn group_row(widget_name: &str, name: &str, count: usize, collapsed: bool) -> gtk::ListBoxRow {
+/// `power` es el identificador del grupo y cuántas de sus sesiones a la vista
+/// están en marcha. Con él la cabecera lleva un botón que las arranca todas
+/// si están paradas, o las detiene si hay alguna en marcha.
+fn group_row(
+    widget_name: &str,
+    name: &str,
+    count: usize,
+    collapsed: bool,
+    power: Option<(i64, usize)>,
+) -> (gtk::ListBoxRow, GroupSummary) {
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let arrow = gtk::Label::new(Some(if collapsed { "▸" } else { "▾" }));
     arrow.add_css_class("mt-arrow");
@@ -494,8 +544,41 @@ fn group_row(widget_name: &str, name: &str, count: usize, collapsed: bool) -> gt
     label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     let counter = gtk::Label::new(Some(&count.to_string()));
     counter.add_css_class("mt-group-count");
+    // Estado resumido de sus sesiones. Solo se enseña con el grupo plegado.
+    let dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    dot.add_css_class("mt-dot");
+    dot.set_valign(gtk::Align::Center);
+    let text = gtk::Label::new(None);
+    text.add_css_class("mt-group-state");
+    let holder = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    holder.append(&dot);
+    holder.append(&text);
+    holder.set_visible(false);
     content.append(&arrow);
     content.append(&label);
+    content.append(&holder);
+    if let Some((group, alive)) = power.filter(|_| count > 0) {
+        // Un interruptor: encendido con sesiones en marcha, apagado sin ellas.
+        let (tooltip, action) = if alive == 0 {
+            ("Grupo apagado. Pulsa para encender sus sesiones, cada una con su conversación", "win.group-start")
+        } else {
+            ("Grupo encendido. Pulsa para apagar sus sesiones. Siguen en la lista para encenderlas después", "win.group-stop")
+        };
+        if alive > 0 && alive < count {
+            counter.set_text(&format!("{alive}/{count}"));
+        }
+        let button = gtk::Button::from_icon_name("system-shutdown-symbolic");
+        button.add_css_class("flat");
+        button.add_css_class("mt-group-power");
+        if alive > 0 {
+            button.add_css_class("on");
+        }
+        button.set_valign(gtk::Align::Center);
+        button.set_tooltip_text(Some(tooltip));
+        button.set_action_name(Some(action));
+        button.set_action_target_value(Some(&group.to_string().to_variant()));
+        content.append(&button);
+    }
     content.append(&counter);
 
     let row = gtk::ListBoxRow::new();
@@ -503,7 +586,14 @@ fn group_row(widget_name: &str, name: &str, count: usize, collapsed: bool) -> gt
     row.add_css_class("mt-group");
     row.set_selectable(false);
     row.set_child(Some(&content));
-    row
+    (row, GroupSummary { holder, dot, text })
+}
+
+/// Señal de estado de un grupo plegado.
+struct GroupSummary {
+    holder: gtk::Box,
+    dot: gtk::Box,
+    text: gtk::Label,
 }
 
 fn session_row(view: &SessionView, project: Option<&Project>, now: i64) -> SessionRow {
@@ -525,16 +615,7 @@ fn session_row(view: &SessionView, project: Option<&Project>, now: i64) -> Sessi
     let title = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     title.append(&name);
     if let Some(project) = project {
-        let chip = gtk::Label::new(Some(&super::projects::label(project)));
-        chip.add_css_class("mt-project");
-        if let Some(class) = super::projects::color_class(project) {
-            chip.add_css_class(&class);
-        }
-        chip.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        chip.set_max_width_chars(14);
-        chip.set_valign(gtk::Align::Center);
-        chip.set_tooltip_text(Some(&format!("Proyecto {}", project.name)));
-        title.append(&chip);
+        title.append(&super::projects::chip(project));
     }
 
     let texts = gtk::Box::new(gtk::Orientation::Vertical, 1);

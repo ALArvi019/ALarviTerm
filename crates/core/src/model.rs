@@ -71,6 +71,8 @@ pub struct NewSession {
     pub extra_args: String,
     pub env: Vec<(String, String)>,
     pub project_id: Option<i64>,
+    /// Conversación de Claude Code ya existente con la que arranca la sesión.
+    pub resume: Option<String>,
 }
 
 /// Colores disponibles para un proyecto: identificador, nombre y valor.
@@ -99,6 +101,13 @@ pub struct Project {
     pub env: Vec<(String, String)>,
     /// Orden de shell que se ejecuta antes de lanzar cada sesión.
     pub startup: String,
+    /// Nombre de la cuenta de Claude con la que trabajan sus sesiones, o vacío
+    /// si usan la predeterminada. Lo pone el usuario: separa los límites de
+    /// uso y las estadísticas de cuentas distintas.
+    pub account: String,
+    /// Fichero de imagen que identifica al proyecto, o vacío. Si lo hay se
+    /// enseña en lugar del icono de texto.
+    pub image: String,
     pub position: i64,
 }
 
@@ -110,6 +119,8 @@ pub struct NewProject {
     pub icon: String,
     pub env: Vec<(String, String)>,
     pub startup: String,
+    pub account: String,
+    pub image: String,
 }
 
 impl NewProject {
@@ -130,6 +141,11 @@ impl NewProject {
         }
         self.icon = self.icon.trim().chars().take(2).collect();
         self.startup = self.startup.trim().to_string();
+        self.account = self.account.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.image = self.image.trim().to_string();
+        if !self.image.is_empty() && !std::path::Path::new(&self.image).is_file() {
+            return Err(Error::Invalid(format!("la imagen {} no existe", self.image)));
+        }
         Ok(self)
     }
 }

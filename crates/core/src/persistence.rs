@@ -59,6 +59,10 @@ const MIGRATIONS: &[&str] = &["
     ALTER TABLE sessions ADD COLUMN project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL;
     ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE sessions ADD COLUMN profile TEXT;
+", "
+    ALTER TABLE projects ADD COLUMN account TEXT NOT NULL DEFAULT '';
+", "
+    ALTER TABLE projects ADD COLUMN image TEXT NOT NULL DEFAULT '';
 "];
 
 pub struct Database {
@@ -363,7 +367,7 @@ impl Database {
 
     pub fn projects(&self) -> Result<Vec<Project>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, path, color, icon, env, startup, position
+            "SELECT id, name, path, color, icon, env, startup, position, account, image
              FROM projects ORDER BY position, id",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -379,6 +383,8 @@ impl Database {
                     env: Vec::new(),
                     startup: row.get(6)?,
                     position: row.get(7)?,
+                    account: row.get(8)?,
+                    image: row.get(9)?,
                 },
                 env,
             ))
@@ -404,8 +410,8 @@ impl Database {
             |r| r.get(0),
         )?;
         self.conn.execute(
-            "INSERT INTO projects (name, path, color, icon, env, startup, position, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO projects (name, path, color, icon, env, startup, position, created_at, account, image)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 new.name,
                 new.path.to_string_lossy(),
@@ -415,6 +421,8 @@ impl Database {
                 new.startup,
                 position,
                 crate::now_unix(),
+                new.account,
+                new.image,
             ],
         )?;
         Ok(Project {
@@ -425,6 +433,8 @@ impl Database {
             icon: new.icon,
             env: new.env,
             startup: new.startup,
+            account: new.account,
+            image: new.image,
             position,
         })
     }
@@ -433,7 +443,8 @@ impl Database {
         let new = new.validated()?;
         self.expect_one(
             self.conn.execute(
-                "UPDATE projects SET name = ?1, path = ?2, color = ?3, icon = ?4, env = ?5, startup = ?6
+                "UPDATE projects SET name = ?1, path = ?2, color = ?3, icon = ?4, env = ?5, startup = ?6,
+                 account = ?8, image = ?9
                  WHERE id = ?7",
                 params![
                     new.name,
@@ -443,6 +454,8 @@ impl Database {
                     env_json(&new.env)?,
                     new.startup,
                     id,
+                    new.account,
+                    new.image,
                 ],
             )?,
             || format!("proyecto {id}"),
@@ -648,6 +661,8 @@ mod tests {
             icon: "🛒 de más".into(),
             env: vec![("NODE_ENV".into(), "dev".into())],
             startup: " nvm use 20 ".into(),
+            account: "  Mi   empresa ".into(),
+            image: String::new(),
         };
         let project = db.create_project(new.clone()).expect("crea");
         assert_eq!(project.name, "Tienda");
@@ -655,7 +670,13 @@ mod tests {
         assert_eq!(project.startup, "nvm use 20");
         assert_eq!(db.projects().expect("lista"), vec![project.clone()]);
 
+        assert_eq!(db.projects().expect("lista")[0].account, "Mi empresa");
         assert!(db.create_project(NewProject { name: " ".into(), ..new.clone() }).is_err());
+        assert!(db.create_project(NewProject { image: "/no/existe.png".into(), ..new.clone() }).is_err());
+        let own = std::env::current_exe().expect("ejecutable").to_string_lossy().into_owned();
+        let pictured = db.create_project(NewProject { image: format!(" {own} "), ..new.clone() }).expect("crea");
+        assert_eq!(pictured.image, own);
+        db.delete_project(pictured.id).expect("borra");
         assert!(db
             .create_project(NewProject { path: "/no/existe".into(), ..new.clone() })
             .is_err());

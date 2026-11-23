@@ -60,7 +60,24 @@ fn run() -> Option<()> {
 fn statusline() {
     let input = read_input().unwrap_or_default();
     let _ = save_limits(&input);
-    let _ = run_user_statusline(&input);
+    let _ = save_context(&input);
+    if std::env::args().nth(2).as_deref() != Some(limits::QUIET_ARG) {
+        let _ = run_user_statusline(&input);
+    }
+}
+
+/// Guarda cuánto contexto lleva usado la sesión, solo si cambia.
+fn save_context(input: &str) -> Option<()> {
+    let session = std::env::var(SESSION_ENV).ok()?;
+    let dir = std::env::var_os(STATE_DIR_ENV).filter(|d| !d.is_empty())?;
+    let dir = Path::new(&dir);
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    let current = limits::SessionContext::from_statusline(&value)?;
+    if limits::read_context(dir, &session) == Some(current) {
+        return Some(());
+    }
+    std::fs::create_dir_all(dir).ok()?;
+    limits::write_context(dir, &session, &current).ok()
 }
 
 /// Guarda los límites solo si cambian, para no despertar a la aplicación en
@@ -70,13 +87,14 @@ fn save_limits(input: &str) -> Option<()> {
     let dir = Path::new(&dir);
     let now = alarviterm_core::now_unix();
     let value: serde_json::Value = serde_json::from_str(input).ok()?;
-    let previous = limits::read(dir);
+    let account = std::env::var(limits::ACCOUNT_ENV).unwrap_or_default();
+    let previous = limits::read(dir, &account);
     let current = RateLimits::from_statusline(&value, now)?.merged_with(previous, now);
     if previous.is_some_and(|p| p.same_data(&current)) {
         return Some(());
     }
     std::fs::create_dir_all(dir).ok()?;
-    limits::write(dir, &current).ok()
+    limits::write(dir, &account, &current).ok()
 }
 
 /// Ejecuta la línea de estado del usuario con la misma entrada y deja que

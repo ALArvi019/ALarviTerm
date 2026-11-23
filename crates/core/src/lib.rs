@@ -12,6 +12,7 @@ pub mod monitor;
 pub mod paths;
 pub mod persistence;
 pub mod plugins;
+pub mod scm;
 pub mod search;
 pub mod sessions;
 pub mod stats;

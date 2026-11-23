@@ -396,6 +396,12 @@ fn base_config(options: &TmuxOptions) -> String {
          set -g focus-events on\n\
          set -g default-terminal \"tmux-256color\"\n\
          set -as terminal-features \",xterm-256color:RGB\"\n\
+         # Los programas deciden si usan color de 24 bits por esta variable. Sin\n\
+         # ella reducen sus colores a la paleta de 256 y los temas se ven lavados.\n\
+         set-environment -g COLORTERM truecolor\n\
+         # Claude Code, dentro de tmux, se limita a 256 colores salvo que se le\n\
+         # diga que el terminal de fuera admite los 24 bits, como es el caso.\n\
+         set-environment -g CLAUDE_CODE_TMUX_TRUECOLOR 1\n\
          set -g history-limit {history}\n\
          # El panel se conserva al terminar el proceso: se ve la salida final y el código de salida.\n\
          set -g remain-on-exit on\n\

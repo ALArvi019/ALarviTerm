@@ -325,6 +325,8 @@ mod tests {
                 permission_mode: None,
                 model: None,
                 launch: None,
+                subagents: 0,
+                background_shell: false,
             }),
         }
     }
