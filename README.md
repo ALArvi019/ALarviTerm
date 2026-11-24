@@ -99,7 +99,9 @@ Atajos de fábrica:
 * `Ctrl+,`: ajustes.
 * `Ctrl+Mayús+S`: estadísticas de uso.
 * `Ctrl+Mayús+N`: nueva sesión.
-* `Ctrl+Mayús+T`: terminal nuevo en el directorio de la sesión actual.
+* `Ctrl+Mayús+H`: continuar una conversación de Claude Code que ya existe, como sesión suelta.
+* `Ctrl+Mayús+T`: terminal nuevo, en una pestaña, en el directorio de la sesión actual.
+* `Ctrl+Mayús+O`: lo mismo, pero en un panel nuevo al lado, con la pantalla dividida.
 * `Ctrl+Mayús+B`: mostrar u ocultar la barra lateral.
 * `Ctrl+Mayús+F`: buscar y filtrar sesiones en la barra lateral.
 * `Ctrl+Tab` y `Ctrl+Mayús+Tab`: sesión siguiente y anterior.
@@ -162,6 +164,8 @@ Para crear una sesión dentro de un proyecto, elígelo en el formulario de sesi�
 ### Traer conversaciones que ya existen
 
 Las conversaciones de Claude Code que tienes abiertas o guardadas fuera de ALarviTerm se pueden añadir a un proyecto sin perder su historial. En la lista de proyectos, el botón del reloj de cada fila abre las conversaciones guardadas en esa carpeta, con el nombre que les pusiste con `/rename`. También está en la paleta, como "Añadir conversaciones existentes al proyecto". Marca las que quieras y cada una pasa a ser una sesión del proyecto, lanzada con `claude --resume` y con los argumentos propuestos en Ajustes.
+
+Para continuar una conversación sin proyecto, `Ctrl+Mayús+H` o "Continuar una conversación" en el menú principal enseñan las 80 más recientes de cualquier carpeta, cada una con su carpeta y su antigüedad. Las que no tienen nombre salen con el principio de lo primero que pediste. La que elijas se abre como sesión suelta, en su carpeta y con su historial.
 
 Una conversación que otro terminal tiene abierta aparece desactivada. Ciérrala allí antes, porque dos procesos escribiendo en la misma conversación la estropean.
 

@@ -6,6 +6,8 @@ Todos los cambios relevantes de ALarviTerm se anotan aquí. El formato sigue [Ke
 
 ### Añadido
 
+* Continuar una conversación de Claude Code de cualquier carpeta como sesión suelta, sin proyecto, con `Ctrl+Mayús+H`.
+* Atajo `Ctrl+Mayús+O` para abrir un terminal en un panel nuevo al lado, en la carpeta de la sesión actual.
 * Botón en la pestaña de código para plegar todo o desplegar de una vez todos los repositorios con cambios.
 * Eliminar un árbol de trabajo de git desde la pestaña de código, con doble confirmación.
 * Límites de uso de la cuenta en el pie: lo usado de las ventanas de 5 horas y de 7 días y el tiempo hasta su reinicio.

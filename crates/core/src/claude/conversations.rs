@@ -76,6 +76,108 @@ pub fn list(config_dir: &Path, cwd: &Path) -> Vec<Conversation> {
     found
 }
 
+/// Cuánto se lee del principio de una transcripción para dar con su carpeta.
+const CWD_SCAN_BYTES: u64 = 512 * 1024;
+
+/// Las `limit` conversaciones más recientes de todas las carpetas, cada una
+/// con la carpeta de trabajo en la que nació, que es donde hay que reanudarla.
+/// Se descartan las que no la dicen o cuya carpeta ya no existe.
+pub fn recent(config_dir: &Path, limit: usize) -> Vec<(Conversation, PathBuf)> {
+    let Ok(folders) = std::fs::read_dir(config_dir.join("projects")) else {
+        return Vec::new();
+    };
+    // Primero solo fechas: leer títulos de miles de ficheros sería lento.
+    let mut files: Vec<(i64, u64, String, PathBuf)> = Vec::new();
+    for folder in folders.flatten() {
+        let Ok(entries) = std::fs::read_dir(folder.path()) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() || meta.len() == 0 || !valid_id(&id) {
+                continue;
+            }
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs() as i64);
+            files.push((modified, meta.len(), id, path));
+        }
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+    let mut found = Vec::new();
+    for (modified, size, id, path) in files {
+        if found.len() >= limit {
+            break;
+        }
+        let mut head = Vec::new();
+        if File::open(&path).and_then(|f| f.take(CWD_SCAN_BYTES).read_to_end(&mut head)).is_err() {
+            continue;
+        }
+        let Some(cwd) = read_cwd(config_dir, &path, &head).filter(|dir| dir.is_dir()) else { continue };
+        // Sin nombre, lo primero que se le pidió dice de qué va.
+        let title = read_title(&path, size).or_else(|| first_prompt(&head));
+        found.push((Conversation { title, id, modified, size }, cwd));
+    }
+    found
+}
+
+/// Carpeta de trabajo que apunta una transcripción y que corresponde a la
+/// carpeta en la que está guardada. Una sesión puede cambiar de directorio a
+/// media conversación, y esas otras rutas no sirven para reanudarla.
+fn read_cwd(config_dir: &Path, path: &Path, head: &[u8]) -> Option<PathBuf> {
+    let home = path.parent()?;
+    let mut from = 0;
+    while let Some(at) = memmem::find(&head[from..], b"\"cwd\":\"") {
+        let at = from + at;
+        let start = memchr::memrchr(b'\n', &head[..at]).map_or(0, |i| i + 1);
+        let stop = memchr::memchr(b'\n', &head[at..]).map_or(head.len(), |i| at + i);
+        let cwd = serde_json::from_slice::<Value>(&head[start..stop])
+            .ok()
+            .and_then(|line| line.get("cwd").and_then(Value::as_str).map(PathBuf::from))
+            .filter(|cwd| transcripts_dir(config_dir, cwd) == home);
+        if cwd.is_some() {
+            return cwd;
+        }
+        from = stop.max(at + 1);
+    }
+    None
+}
+
+/// Largo máximo del nombre que se saca de la primera petición.
+const PROMPT_CHARS: usize = 48;
+
+/// Primera petición escrita por el usuario, recortada a una línea corta. Se
+/// saltan los mensajes que pone Claude Code por su cuenta, que van entre
+/// etiquetas.
+fn first_prompt(head: &[u8]) -> Option<String> {
+    head.split(|b| *b == b'\n').find_map(|line| {
+        memmem::find(line, b"\"type\":\"user\"")?;
+        let line = serde_json::from_slice::<Value>(line).ok()?;
+        if line.get("type").and_then(Value::as_str) != Some("user") {
+            return None;
+        }
+        let content = line.get("message")?.get("content")?;
+        let text = match content {
+            Value::String(text) => text.as_str(),
+            Value::Array(parts) => parts.iter().find_map(|p| p.get("text").and_then(Value::as_str))?,
+            _ => return None,
+        };
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() || text.starts_with('<') {
+            return None;
+        }
+        Some(match text.char_indices().nth(PROMPT_CHARS) {
+            Some((cut, _)) => format!("{}…", text[..cut].trim_end()),
+            None => text,
+        })
+    })
+}
+
 /// Un identificador que se puede pasar a `claude --resume` sin sorpresas.
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
@@ -237,6 +339,32 @@ mod tests {
         );
         assert!(list(&config, Path::new("/no/existe")).is_empty());
         let _ = std::fs::remove_dir_all(&config);
+    }
+
+    #[test]
+    fn lists_recent_conversations_of_every_folder_with_their_directory() {
+        let config = scratch("recent");
+        let (one, two) = (scratch("recent-one"), scratch("recent-two"));
+        for (cwd, id, body) in [
+            (&one, "aaa-1", format!("{{\"type\":\"custom-title\",\"customTitle\":\"UNO\"}}\n{{\"type\":\"user\",\"cwd\":\"/otra/parte\"}}\n{{\"type\":\"user\",\"cwd\":\"{}\"}}\n", one.display())),
+            (&two, "bbb-2", format!("{{\"type\":\"user\",\"message\":{{\"content\":\"<aviso>x</aviso>\"}}}}\n{{\"type\":\"user\",\"cwd\":\"{}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"arregla  el\\nlogin y además revisa todas las pruebas de la tienda entera\"}}]}}}}\n", two.display())),
+            (&two, "ccc-3", "{\"type\":\"user\"}\n".to_string()),
+        ] {
+            let dir = transcripts_dir(&config, cwd);
+            std::fs::create_dir_all(&dir).expect("carpeta");
+            std::fs::write(dir.join(format!("{id}.jsonl")), body).expect("transcripción");
+        }
+        let mut found = recent(&config, 10);
+        found.sort_by(|a, b| a.0.id.cmp(&b.0.id));
+        let seen: Vec<_> = found.iter().map(|(c, dir)| (c.id.as_str(), c.title.as_deref(), dir.clone())).collect();
+        assert_eq!(seen, vec![("aaa-1", Some("UNO"), one.clone()), ("bbb-2", Some("arregla el login y además revisa todas las prueb…"), two.clone())]);
+        assert_eq!(recent(&config, 1).len(), 1);
+        // Una carpeta que ya no existe no se ofrece.
+        std::fs::remove_dir_all(&two).expect("borra");
+        assert_eq!(recent(&config, 10).len(), 1);
+        for dir in [&config, &one] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]

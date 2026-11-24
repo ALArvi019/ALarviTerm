@@ -3,6 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
@@ -47,6 +48,8 @@ use super::terminal;
 /// Cada cuánto se consulta al backend mientras la ventana está activa. Es una
 /// sola ejecución de tmux de pocos milisegundos. Con la ventana en segundo
 /// plano no se consulta nada.
+/// Cuántas conversaciones recientes se ofrecen para continuar.
+const RECENT_CONVERSATIONS: usize = 80;
 const REFRESH_SECONDS: u32 = 10;
 
 /// Cada cuánto se mide el consumo del equipo para el pie.
@@ -311,6 +314,7 @@ impl MainWindow {
         commands.set_action_name(Some("win.command-palette"));
         let main_menu = gio::Menu::new();
         main_menu.append_item(&sidebar::plain_item("Paleta de comandos", "win.command-palette"));
+        main_menu.append_item(&sidebar::plain_item("Continuar una conversación", "win.resume-conversation"));
         main_menu.append_item(&sidebar::plain_item("Proyectos", "win.projects"));
         main_menu.append_item(&sidebar::plain_item("Atajos de teclado", "win.shortcuts"));
         main_menu.append_item(&sidebar::plain_item("Estadísticas de uso", "win.stats"));
@@ -1946,7 +1950,8 @@ impl MainWindow {
     }
 
     /// Shell nuevo en el directorio y grupo de la sesión actual.
-    fn new_terminal(&self) {
+    /// Con `beside` se abre en un panel nuevo al lado. Sin él, en una pestaña.
+    fn new_terminal(&self, beside: bool) {
         let current = self.selected().and_then(|id| self.view(&id));
         let cwd = current
             .as_ref()
@@ -1972,7 +1977,13 @@ impl MainWindow {
         };
         if let Some(session) = self.run(|m| m.create_session(new)) {
             self.reload(false);
-            self.open_session(&session.id);
+            if beside {
+                self.run(|m| m.mark_opened(&session.id));
+                let pane = self.0.layout.borrow().focused();
+                self.split_pane(pane, Orientation::Horizontal, Some(&session.id));
+            } else {
+                self.open_session(&session.id);
+            }
         }
     }
 
@@ -2019,7 +2030,9 @@ impl MainWindow {
     fn install_actions(&self) {
         self.add_target_action("plugin-action", |this, target| this.plugin_action(target));
         self.add_action("new-session", |this| this.new_session_dialog(None));
-        self.add_action("new-terminal", |this| this.new_terminal());
+        self.add_action("resume-conversation", |this| this.resume_conversations());
+        self.add_action("new-terminal", |this| this.new_terminal(false));
+        self.add_action("new-terminal-beside", |this| this.new_terminal(true));
         self.add_action("new-group", |this| this.new_group_dialog());
         self.add_action("toggle-sidebar", |this| this.toggle_sidebar());
         self.add_action("next-session", |this| this.cycle(1));
@@ -3189,6 +3202,7 @@ impl MainWindow {
             }
             Some(RowTarget::Ungrouped) | None => {
                 menu.append_item(&sidebar::plain_item("Nueva sesión", "win.new-session"));
+                menu.append_item(&sidebar::plain_item("Continuar una conversación", "win.resume-conversation"));
                 menu.append_item(&sidebar::plain_item("Nuevo grupo", "win.new-group"));
             }
         }
@@ -3269,18 +3283,25 @@ impl MainWindow {
                     } else {
                         None
                     };
-                    (c, blocked)
+                    (c, blocked, None)
                 })
                 .collect();
             let on_import = {
                 let project = project.clone();
                 this.handler(move |this, chosen: Vec<(String, String)>| {
-                    this.add_conversations(&project, chosen);
+                    let chosen = chosen.into_iter().map(|(id, name)| (id, name, project.path.clone())).collect();
+                    this.add_conversations(Some(project.id), chosen);
                 })
             };
             let dialog = dialogs::import_conversations(
                 &this.0.window,
-                &projects::label(&project),
+                "Añadir conversaciones existentes",
+                &format!(
+                    "Conversaciones de Claude Code guardadas en la carpeta de {}. Las que elijas se \
+                     reanudan como sesiones del proyecto, con su historial. Una conversación abierta \
+                     en otro terminal hay que cerrarla allí antes.",
+                    projects::label(&project)
+                ),
                 found,
                 alarviterm_core::now_unix(),
                 on_import,
@@ -3289,13 +3310,73 @@ impl MainWindow {
         });
     }
 
-    fn add_conversations(&self, project: &alarviterm_core::model::Project, chosen: Vec<(String, String)>) {
+    /// Conversaciones recientes de cualquier carpeta, para reanudar una como
+    /// sesión suelta, sin proyecto.
+    fn resume_conversations(&self) {
+        let Some(config) = limits::claude_config_dir() else {
+            return;
+        };
+        let here: HashSet<String> = self
+            .0
+            .snapshot
+            .borrow()
+            .sessions
+            .iter()
+            .filter_map(|v| v.agent.as_ref().and_then(|a| a.conversation.clone()))
+            .collect();
+        let weak = self.weak();
+        glib::spawn_future_local(async move {
+            let read = gio::spawn_blocking(move || {
+                (conversations::recent(&config, RECENT_CONVERSATIONS), conversations::open_now(&config))
+            })
+            .await;
+            let (Some(inner), Ok((found, open))) = (weak.upgrade(), read) else {
+                return;
+            };
+            let this = MainWindow(inner);
+            let folders: HashMap<String, PathBuf> = found.iter().map(|(c, dir)| (c.id.clone(), dir.clone())).collect();
+            let found = found
+                .into_iter()
+                .map(|(c, dir)| {
+                    let blocked = if here.contains(&c.id) {
+                        Some(dialogs::Blocked::AlreadyHere)
+                    } else if open.contains_key(&c.id) {
+                        Some(dialogs::Blocked::OpenElsewhere)
+                    } else {
+                        None
+                    };
+                    (c, blocked, Some(alarviterm_core::paths::display_path(&dir)))
+                })
+                .collect();
+            let on_import = this.handler(move |this, chosen: Vec<(String, String)>| {
+                let chosen = chosen
+                    .into_iter()
+                    .filter_map(|(id, name)| folders.get(&id).cloned().map(|dir| (id, name, dir)))
+                    .collect();
+                this.add_conversations(None, chosen);
+            });
+            let dialog = dialogs::import_conversations(
+                &this.0.window,
+                "Continuar una conversación",
+                "Tus conversaciones de Claude Code más recientes, de cualquier carpeta. Las que elijas \
+                 se reanudan como sesiones sueltas, sin proyecto, en su carpeta y con su historial. \
+                 Una conversación abierta en otro terminal hay que cerrarla allí antes.",
+                found,
+                alarviterm_core::now_unix(),
+                on_import,
+            );
+            this.refocus_after(&dialog);
+        });
+    }
+
+    /// Crea una sesión por conversación elegida: identificador, nombre y carpeta.
+    fn add_conversations(&self, project_id: Option<i64>, chosen: Vec<(String, String, PathBuf)>) {
         let extra_args = self.0.settings.borrow().default_args.clone();
         let model = Some(self.0.settings.borrow().default_model.clone());
         // Entre la lista y la pulsación puede haberse abierto en otro sitio.
         let open = limits::claude_config_dir().map(|c| conversations::open_now(&c)).unwrap_or_default();
         let mut first = None;
-        for (conversation, name) in chosen {
+        for (conversation, name, cwd) in chosen {
             if open.contains_key(&conversation) {
                 self.toast(&format!("{name} está abierta en otro terminal, no se añade"));
                 continue;
@@ -3304,11 +3385,11 @@ impl MainWindow {
                 name,
                 group_id: None,
                 kind: SessionKind::Claude,
-                cwd: project.path.clone(),
+                cwd,
                 model: model.clone(),
                 extra_args: extra_args.clone(),
                 env: Vec::new(),
-                project_id: Some(project.id),
+                project_id,
                 resume: Some(conversation),
             };
             if let Some(session) = self.run(|m| m.create_session(new)) {

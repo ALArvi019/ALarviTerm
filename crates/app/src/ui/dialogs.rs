@@ -343,41 +343,36 @@ pub enum Blocked {
     AlreadyHere,
 }
 
-/// Conversaciones de Claude Code que ya existen en la carpeta de un proyecto,
-/// para elegir cuáles pasan a ser sesiones. `on_import` recibe las elegidas
-/// con el nombre que tendrá cada sesión.
+/// Conversaciones de Claude Code que ya existen, para elegir cuáles pasan a
+/// ser sesiones. Cada una puede llevar la carpeta en la que vive, que se
+/// enseña en su fila. `on_import` recibe las elegidas con el nombre que tendrá
+/// cada sesión.
 pub fn import_conversations(
     parent: &impl IsA<gtk::Widget>,
-    project: &str,
-    found: Vec<(Conversation, Option<Blocked>)>,
+    title: &str,
+    description: &str,
+    found: Vec<(Conversation, Option<Blocked>, Option<String>)>,
     now: i64,
     on_import: impl Fn(Vec<(String, String)>) + 'static,
 ) -> adw::Dialog {
-    let dialog = adw::Dialog::builder()
-        .title("Añadir conversaciones existentes")
-        .content_width(620)
-        .content_height(560)
-        .build();
+    let dialog = adw::Dialog::builder().title(title).content_width(620).content_height(560).build();
 
     let group = adw::PreferencesGroup::new();
-    group.set_description(Some(&format!(
-        "Conversaciones de Claude Code guardadas en la carpeta de {project}. Las que elijas se \
-         reanudan como sesiones del proyecto, con su historial. Una conversación abierta en otro \
-         terminal hay que cerrarla allí antes."
-    )));
+    group.set_description(Some(description));
     let import = gtk::Button::with_label("Añadir");
     import.add_css_class("suggested-action");
     import.set_sensitive(false);
 
     let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Filtrar por nombre"));
+    search.set_placeholder_text(Some("Filtrar por nombre o carpeta"));
     search.set_visible(found.len() > 8);
     let mut rows: Vec<(adw::ActionRow, String)> = Vec::new();
     let mut checks: Vec<(gtk::CheckButton, String, String)> = Vec::new();
-    for (conversation, blocked) in &found {
+    for (conversation, blocked, folder) in &found {
         let short: String = conversation.id.chars().take(8).collect();
         let name = conversation.title.clone().unwrap_or_else(|| format!("Conversación {short}"));
-        let mut details = vec![ago(now - conversation.modified), size_text(conversation.size)];
+        let mut details: Vec<String> = folder.iter().cloned().collect();
+        details.extend([ago(now - conversation.modified), size_text(conversation.size)]);
         match blocked {
             Some(Blocked::OpenElsewhere) => details.push("abierta en otro terminal".into()),
             Some(Blocked::AlreadyHere) => details.push("ya es una sesión de ALarviTerm".into()),
@@ -397,7 +392,7 @@ pub fn import_conversations(
             checks.push((check, conversation.id.clone(), name.clone()));
         }
         group.add(&row);
-        rows.push((row, name.to_lowercase()));
+        rows.push((row, format!("{name} {}", folder.as_deref().unwrap_or("")).to_lowercase()));
     }
     search.connect_search_changed(move |entry| {
         let wanted = entry.text().trim().to_lowercase();
@@ -407,7 +402,7 @@ pub fn import_conversations(
     });
     if found.is_empty() {
         let empty = adw::ActionRow::builder()
-            .title("No hay conversaciones guardadas en esta carpeta")
+            .title("No hay conversaciones guardadas")
             .build();
         empty.add_css_class("dim-label");
         group.add(&empty);

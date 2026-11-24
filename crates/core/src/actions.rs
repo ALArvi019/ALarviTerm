@@ -84,6 +84,18 @@ pub const ACTIONS: &[ActionDef] = &[
         &[("Ctrl+Shift+N", true), ("Ctrl+N", false)],
     ),
     action("new-terminal", "Nuevo terminal en la carpeta actual", Category::Sessions, &[("Ctrl+Shift+T", true)]),
+    action(
+        "resume-conversation",
+        "Continuar una conversación de Claude Code",
+        Category::Sessions,
+        &[("Ctrl+Shift+H", true)],
+    ),
+    action(
+        "new-terminal-beside",
+        "Nuevo terminal en un panel al lado",
+        Category::Sessions,
+        &[("Ctrl+Shift+O", true)],
+    ),
     action("new-group", "Nuevo grupo", Category::Sessions, &[]),
     action("next-session", "Sesión siguiente", Category::Sessions, &[("Ctrl+Tab", true)]),
     action("previous-session", "Sesión anterior", Category::Sessions, &[("Ctrl+Shift+Tab", true)]),
